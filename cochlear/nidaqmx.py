@@ -83,13 +83,18 @@ class DAQmxBase(object):
             except ni.DAQError:
                 pass
 
+    def clear(self):
+        for task in self._tasks:
+            try:
+                ni.DAQmxClearTask(task)
+            except ni.DAQError:
+                pass
+
 
 class DAQmxSource(DAQmxBase):
     '''
     Read data from device
     '''
-
-    fs = 25e3
 
     def register_change_detect_callback(self, callback, rising=None,
                                         falling=None):
@@ -237,6 +242,11 @@ class TriggeredDAQmxSource(DAQmxSource):
                                          self.callback)
         self._tasks.extend((self._task_analog, self._task_digital))
 
+        result = ctypes.c_uint32()
+        ni.DAQmxGetTaskNumChans(self._task_analog, result)
+        self.channels = result.value
+        log.debug('Configured retriggerable AI with %d channels', self.channels)
+
     def create_retriggerable_ai(self, ai, trigger, counter=None, run=None,
                                 callback=None, task_input=None,
                                 task_record=None):
@@ -287,7 +297,7 @@ class TriggeredDAQmxSource(DAQmxSource):
         ni.DAQmxCfgSampClkTiming(task_input, counter+'InternalOutput', self.fs,
                                  ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
                                  self.epoch_size)
-        ni.DAQmxSetBufInputBufSize(task_input, self.epoch_size*100)
+        ni.DAQmxSetBufInputBufSize(task_input, self.epoch_size*1000)
 
         ni.DAQmxCreateCOPulseChanFreq(task_record, counter, '', ni.DAQmx_Val_Hz,
                                       ni.DAQmx_Val_Low, 0, self.fs, 0.5)
@@ -304,58 +314,46 @@ class TriggeredDAQmxSource(DAQmxSource):
         ni.DAQmxTaskControl(task_record, ni.DAQmx_Val_Task_Commit)
 
         if callback is not None:
-            print 'registering callback'
             self._everynsamples_cb = callback
-
             def event_cb(task, event_type, n_samples, data):
                 self._everynsamples_cb()
                 return 0
 
+            samples = self.epoch_size
+            log.debug('Configuring every N samples callback with %d samples',
+                      samples)
             self._everynsamples_cb_ptr = \
                 ni.DAQmxEveryNSamplesEventCallbackPtr(event_cb)
             event_type = ni.DAQmx_Val_Acquired_Into_Buffer
             ni.DAQmxRegisterEveryNSamplesEvent(task_input, event_type,
-                                               self.epoch_size, 0,
+                                               samples, 0,
                                                self._everynsamples_cb_ptr, None)
 
         return task_input, task_record
 
-    #def register_task_done_callback(self, callback):
-    #    self._task_done_callback = callback
-
-    #    # Pointers to classmethods are not supported by ctypes, so we need
-    #    # to take advantage of function closure to maintain a reference to
-    #    # self.  Must return 0 to keep NIDAQmx happy (NIDAQmx expects all
-    #    # functions to return 0 to indicate success.  A non-zero return
-    #    # value indicates there was a nerror).
-    #    def event_cb(task, status, data):
-    #        self._task_done_callback()
-    #        return 0
-
-    #    # Binding the pointer to an attribute on self seems to be necessary to
-    #    # ensure the callback function does not disappear (presumably it gets
-    #    # garbage-collected otherwise)
-    #    self._task_done_callback_ptr = ni.DAQmxDoneEventCallbackPtr(event_cb)
-    #    ni.DAQmxRegisterDoneEvent(self._task_analog, 0,
-    #                              self._task_done_callback_ptr, None)
-
-    #def read_timer(self):
-    #    result = ctypes.c_uint32()
-    #    ni.DAQmxReadCounterScalarU32(self._task_counter, 0, result, None)
-    #    return result.value
+    def read_timer(self):
+        result = ctypes.c_uint32()
+        ni.DAQmxReadCounterScalarU32(self._task_counter, 0, result, None)
+        return result.value
 
     def read_analog(self, timeout=None, restart=False):
         if timeout is None:
             timeout = 0
+        result = ctypes.c_uint32()
+        ni.DAQmxGetReadAvailSampPerChan(self._task_analog, result)
+        log.debug('%d s/chan available for %s', result.value, self.input_line)
+
         result = ctypes.c_long()
-        analog_data = np.empty(self.epoch_size, dtype=np.double)
+        samples = self.epoch_size*self.channels
+        analog_data = np.empty(samples, dtype=np.double)
         ni.DAQmxReadAnalogF64(self._task_analog, self.epoch_size, timeout,
-                              ni.DAQmx_Val_GroupByChannel, analog_data,
-                              self.epoch_size, result, None)
+                              ni.DAQmx_Val_GroupByChannel, analog_data, samples,
+                              result, None)
+        log.debug('Read %d s/chan from %s', result.value, self.input_line)
         if restart:
             ni.DAQmxStopTask(self._task_analog)
             ni.DAQmxStartTask(self._task_analog)
-        return analog_data
+        return analog_data.reshape((self.channels, -1))
 
     def samples_available(self):
         result = ctypes.c_uint32()
@@ -459,7 +457,6 @@ class DAQmxSink(DAQmxBase, Sink):
         return result.value
 
     def complete(self):
-        print self.status(), self.samples_written
         return self.status() == self.samples_written
 
 
@@ -529,6 +526,7 @@ class DAQmxAttenControl(DAQmxBase):
         self.mute_line = mute_line
         self.zc_line = zc_line
         self.hw_clock = hw_clock
+        super(DAQmxAttenControl, self).__init__()
 
     def _setup_serial_timer(self, timer):
         # Configure timing of digital output using a counter that runs at twice
@@ -618,9 +616,8 @@ class DAQmxAttenControl(DAQmxBase):
         if self._task_clk is not None:
             ni.DAQmxStartTask(self._task_clk)
 
-    def clear(self):
-        ni.DAQmxClearTask(self._task_com)
-        ni.DAQmxClearTask(self._task_clk)
+        self._tasks.extend((self._task_clk, self._task_zc, self._task_mute,
+                            self._task_com))
 
     def _gain_to_byte(self, gain):
         '''
