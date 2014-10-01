@@ -202,17 +202,20 @@ class ChirpCal(HasTraits):
         #plot.overlays.append(pan)
         container.add(plot)
 
-        index_range = DataRange1D(low_setting=0, high_setting=100e3)
+        index_range = DataRange1D(low_setting=self.paradigm.freq_lb-1000,
+                                  high_setting=self.paradigm.freq_ub+1000)
         index_mapper = LinearMapper(range=index_range)
-        value_range = DataRange1D(low_setting=0, high_setting=1e7)
-        value_mapper = LogMapper(range=value_range)
+        value_range = DataRange1D(low_setting=0, high_setting=140)
+        value_mapper = LinearMapper(range=value_range)
         plot = FFTChannelPlot(index_mapper=index_mapper,
                               value_mapper=value_mapper,
-                              source=self.data.microphone)
+                              source=self.data.microphone, db=True,
+                              reference_value=1)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Frequency (Hz)")
         plot.underlays.append(axis)
-        axis = PlotAxis(component=plot, orientation='left', title="Specturm (V)")
+        axis = PlotAxis(component=plot, orientation='left',
+                        title="Spectrum (dB SPL)")
         plot.underlays.append(axis)
         container.add(plot)
         self.container = container
