@@ -297,7 +297,15 @@ class ChirpCal(HasTraits):
     )
 
 
-if __name__ == '__main__':
+def launch_gui(**kwargs):
+    import tables
+    with tables.open_file('temp.hdf5', 'w') as fh:
+        data = ChirpCalData(store_node=fh.root)
+        controller = ChirpCalController()
+        ChirpCal(data=data).edit_traits(handler=controller, **kwargs)
+
+
+def main():
     import tables
     import logging
     logging.basicConfig(level='DEBUG')
@@ -305,3 +313,7 @@ if __name__ == '__main__':
         data = ChirpCalData(store_node=fh.root)
         controller = ChirpCalController()
         ChirpCal(data=data).configure_traits(handler=controller)
+
+
+if __name__ == '__main__':
+    main()
