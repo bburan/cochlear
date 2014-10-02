@@ -292,6 +292,9 @@ class ChirpCal(HasTraits):
             Action(name='Stop', action='stop',
                    image=ImageResource('Stop', icon_dir),
                    enabled_when='handler.state=="running"'),
+            Action(name='Save', action='save',
+                   image=ImageResource('save', icon_dir),
+                   enabled_when='handler.state=="running"'),
         ),
         resizable=True,
     )
