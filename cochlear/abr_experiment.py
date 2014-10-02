@@ -15,7 +15,7 @@ from nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
 
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
-                        AbstractController, AbstractExperiment)
+                        AbstractController, AbstractExperiment, util)
 from experiment.channel import FileEpochChannel
 
 from experiment.plots.epoch_channel_plot import EpochChannelPlot
@@ -34,18 +34,16 @@ ADC_FS = 50e3
 class ABRData(AbstractData):
 
     waveforms = Any
-    epoch_size = Int(int(10e-3*ADC_FS))
     waveform_node = Any
 
     def _waveform_node_default(self):
-        fh = self.store_node._v_file
-        return fh.create_group(self.store_node, 'waveforms')
+        return self.fh.create_group(self.store_node, 'waveforms')
 
-    def create_waveform_channel(self, trial):
+    def create_waveform_channel(self, trial, fs, epoch_duration):
         # We use a separate "channel" for each trial set.
         channel = FileEpochChannel(node=self.waveform_node,
                                    name='stack_{}'.format(trial),
-                                   epoch_size=self.epoch_size, fs=ADC_FS,
+                                   epoch_duration=epoch_duration, fs=fs,
                                    dtype=np.double, use_checksum=True)
         self.current_channel = channel
         return channel
@@ -118,34 +116,7 @@ class ABRController(DAQmxDefaults, AbstractController):
     stop_requested = Bool(False)
 
     def setup_experiment(self, info=None):
-        self.iface_adc.clear()
-        self.iface_dac.clear()
-
-        self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
-                                              epoch_duration=10e-3,
-                                              input_line=self.ERP_INPUT,
-                                              counter_line=self.ERP_COUNTER,
-                                              trigger_line=self.ERP_TRIGGER,
-                                              callback=self.poll)
-
-        self.iface_dac = DAQmxSink(name='sink', fs=self.dac_fs,
-                                   calibration=Attenuation(),
-                                   output_line=self.SPEAKER_OUTPUT,
-                                   trigger_line=self.SPEAKER_TRIGGER,
-                                   run_line=self.SPEAKER_RUN)
-
-        self.iface_atten = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
-                                             cs_line=self.VOLUME_CS,
-                                             data_line=self.VOLUME_SDI,
-                                             mute_line=self.VOLUME_MUTE,
-                                             zc_line=self.VOLUME_ZC,
-                                             hw_clock=self.DIO_CLOCK)
-
-        self.current_graph = Tone(name='tone') >> \
-            Cos2Envelope(name='envelope') >> \
-            self.iface_dac
-
-        self.iface_adc.setup()
+        pass
 
     def start_experiment(self, info=None):
         self.next_stimulus()
@@ -154,7 +125,30 @@ class ABRController(DAQmxDefaults, AbstractController):
         self.stop_requested = True
 
     def next_stimulus(self):
+        iface_atten = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
+                                        cs_line=self.VOLUME_CS,
+                                        data_line=self.VOLUME_SDI,
+                                        mute_line=self.VOLUME_MUTE,
+                                        zc_line=self.VOLUME_ZC,
+                                        hw_clock=self.DIO_CLOCK)
+        self.iface_dac = DAQmxSink(name='sink', fs=self.dac_fs,
+                                   calibration=Attenuation(),
+                                   output_line=self.SPEAKER_OUTPUT,
+                                   trigger_line=self.SPEAKER_TRIGGER,
+                                   run_line=self.SPEAKER_RUN,
+                                   attenuator=iface_atten)
+        self.current_graph = Tone(name='tone') >> \
+            Cos2Envelope(name='envelope') >> \
+            self.iface_dac
         self.refresh_context(evaluate=True)
+        epoch_duration = self.get_current_value('window')
+        self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
+                                              epoch_duration=epoch_duration,
+                                              input_line=self.ERP_INPUT,
+                                              counter_line=self.ERP_COUNTER,
+                                              trigger_line=self.ERP_TRIGGER,
+                                              callback=self.poll)
+        self.iface_adc.setup()
         self.model.plot.source = \
             self.model.data.create_waveform_channel(self.current_trial)
 
@@ -172,20 +166,15 @@ class ABRController(DAQmxDefaults, AbstractController):
         self.current_graph.play_queue()
 
     def poll(self):
-        # Read in new data and save it.  Even if we've acquired enough
-        # averages, we should go ahead and read in any new data we can.
+        # Read in new data and save it.  Even if we've acquired enough averages,
+        # we should go ahead and read in any new data we can.
         waveform = self.iface_adc.read_analog(timeout=-1)
         self.model.data.current_channel.send(waveform)
         self.current_repetitions += 1
 
-        # Did the user request a stop?
-        if self.stop_requested:
-            # TODO - figure out logic here
-            pass
-
-        # Since we can use this function as an external callback for the
-        # niDAQmx library, we need to guard against repeated calls to the
-        # method after we have determined the current ABR is done.
+        # Since we can use this function as an external callback for the niDAQmx
+        # library, we need to guard against repeated calls to the method after
+        # we have determined the current ABR is done.
         if not self.done:
             threshold = self.get_current_value('reject_threshold')
             self.current_valid_repetitions = \
@@ -194,6 +183,9 @@ class ABRController(DAQmxDefaults, AbstractController):
                     self.get_current_value('averages'):
                 self.done = True
                 if not self.stop_requested:
+                    self.iface_adc.clear()
+                    self.iface_dac.clear()
+                    self.iface_atten.clear()
                     self.next_stimulus()
                 else:
                     self.state = 'halted'
@@ -225,6 +217,8 @@ class ABRController(DAQmxDefaults, AbstractController):
         import calibration_chirp
         calibration_chirp.launch_gui(parent=info.ui.control)
 
+    def load_system_calibration(self):
+        print util.get_save_file('*_cal.hdf5')
 
 class ABRExperiment(AbstractExperiment):
 
@@ -327,7 +321,6 @@ if __name__ == '__main__':
     import PyDAQmx as ni
     ni.DAQmxResetDevice('Dev1')
     import logging
-    #logging.basicConfig(level='DEBUG')
     with tables.open_file('test.hd5', 'w') as fh:
         data = ABRData(store_node=fh.root)
         experiment = ABRExperiment(data=data, paradigm=ABRParadigm())
