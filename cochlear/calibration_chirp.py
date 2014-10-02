@@ -1,18 +1,25 @@
 from __future__ import division
 
-import numpy as np
+import tempfile
+import os.path
+import shutil
 
-from traits.api import (HasTraits, Float, Instance, Int, Property, Any)
+import numpy as np
+import tables
+
+from traits.api import (HasTraits, Float, Instance, Int, Property, Any, Bool)
 from traitsui.api import View, Item, VGroup, ToolBar, Action, HSplit
 from pyface.api import ImageResource
 from enable.api import Component, ComponentEditor
 from chaco.api import (DataRange1D, LinearMapper, VPlotContainer, PlotAxis,
                        create_line_plot)
 
-from experiment import icon_dir, AbstractController, AbstractData
+from experiment import (icon_dir, AbstractController, AbstractData,
+                        AbstractParadigm)
 from experiment.channel import FileEpochChannel
 from experiment.plots.fft_channel_plot import FFTChannelPlot
 from experiment.plots.epoch_channel_plot import EpochChannelPlot
+from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
 from neurogen.calibration import Attenuation
@@ -24,7 +31,7 @@ DAC_FS = 200e3
 ADC_FS = 200e3
 
 
-class ChirpCalSettings(HasTraits):
+class ChirpCalSettings(AbstractParadigm):
 
     kw = dict(context=True)
     ref_mic_sens = Float(0.015, label='Ref. mic. sens. (V/Pa)', **kw)
@@ -87,14 +94,13 @@ class ChirpCalData(AbstractData):
 
     def _create_microphone_nodes(self, fs, epoch_duration):
         fh = self.store_node._v_file
-        epoch_n = int(fs*epoch_duration)
         node = FileEpochChannel(node=fh.root, name='exp_microphone',
-                                epoch_size=epoch_n, fs=fs, dtype=np.double,
-                                use_checksum=True)
+                                epoch_duration=epoch_duration, fs=fs,
+                                dtype=np.double, use_checksum=True)
         self.exp_microphone = node
         node = FileEpochChannel(node=fh.root, name='ref_microphone',
-                                epoch_size=epoch_n, fs=fs, dtype=np.double,
-                                use_checksum=True)
+                                epoch_duration=epoch_duration, fs=fs,
+                                dtype=np.double, use_checksum=True)
         self.ref_microphone = node
 
     def compute_transfer_functions(self, ref_mic_sens):
@@ -114,14 +120,30 @@ class ChirpCalData(AbstractData):
 
 class ChirpCalController(DAQmxDefaults, AbstractController):
 
+    filename = os.path.join(tempfile.gettempdir(),
+                            'microphone_calibration.hdf5')
     adc_fs = ADC_FS
     dac_fs = DAC_FS
     epochs_acquired = Int(0)
+    complete = Bool(False)
+    fh = Any(None)
 
     MIC_INPUT = '/{}/ai0:1'.format(DAQmxDefaults.DEV)
 
+    def save(self, info=None):
+        filename = get_save_file('c:/', 'Microphone calibration|*_miccal.hdf5')
+        if filename is not None:
+            # Ensure all data is written to file before we copy it over
+            self.fh.flush()
+            shutil.copy(self.filename, filename)
+
     def start(self, info=None):
+        self.complete = False
         self.state = 'running'
+        if self.fh is not None:
+            self.fh.close()
+        self.fh = tables.open_file(self.filename, 'w')
+        self.model.data = ChirpCalData(store_node=self.fh.root)
         self.initialize_context()
         self.refresh_context()
 
@@ -139,19 +161,19 @@ class ChirpCalController(DAQmxDefaults, AbstractController):
                                               trigger_duration=10e-3)
 
         calibration = Attenuation(vrms=self.get_current_value('amplitude'))
-        self.iface_dac = DAQmxSink(name='sink',
-                                   fs=self.dac_fs,
-                                   calibration=calibration,
-                                   output_line=self.SPEAKER_OUTPUT,
-                                   trigger_line=self.SPEAKER_TRIGGER,
-                                   run_line=self.SPEAKER_RUN)
-
         self.iface_att = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
                                            cs_line=self.VOLUME_CS,
                                            data_line=self.VOLUME_SDI,
                                            mute_line=self.VOLUME_MUTE,
                                            zc_line=self.VOLUME_ZC,
                                            hw_clock=self.DIO_CLOCK)
+        self.iface_dac = DAQmxSink(name='sink',
+                                   fs=self.dac_fs,
+                                   calibration=calibration,
+                                   output_line=self.SPEAKER_OUTPUT,
+                                   trigger_line=self.SPEAKER_TRIGGER,
+                                   run_line=self.SPEAKER_RUN,
+                                   attenuator=self.iface_att)
 
         # By using an Attenuation calibration and setting tone level to 0, a 1
         # Vrms sine wave will be generated at each frequency as the reference.
@@ -205,7 +227,9 @@ class ChirpCalController(DAQmxDefaults, AbstractController):
         if self.epochs_acquired == self.get_current_value('averages'):
             ref_mic_sens = self.get_current_value('ref_mic_sens')
             self.model.data.compute_transfer_functions(ref_mic_sens)
+            self.model.data.save(**dict(self.model.paradigm.items()))
             self.model.generate_plots()
+            self.complete = True
             self.stop()
 
 
@@ -293,15 +317,15 @@ class ChirpCal(HasTraits):
                    image=ImageResource('Stop', icon_dir),
                    enabled_when='handler.state=="running"'),
             Action(name='Save', action='save',
-                   image=ImageResource('save', icon_dir),
-                   enabled_when='handler.state=="running"'),
+                   image=ImageResource('document_save', icon_dir),
+                   enabled_when='handler.complete')
         ),
         resizable=True,
     )
 
 
 def launch_gui(**kwargs):
-    import tables
+
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = ChirpCalData(store_node=fh.root)
         controller = ChirpCalController()
@@ -309,13 +333,8 @@ def launch_gui(**kwargs):
 
 
 def main():
-    import tables
-    import logging
-    logging.basicConfig(level='DEBUG')
-    with tables.open_file('temp.hdf5', 'w') as fh:
-        data = ChirpCalData(store_node=fh.root)
-        controller = ChirpCalController()
-        ChirpCal(data=data).configure_traits(handler=controller)
+    controller = ChirpCalController()
+    ChirpCal().configure_traits(handler=controller)
 
 
 if __name__ == '__main__':
