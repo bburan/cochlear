@@ -365,12 +365,11 @@ class DAQmxSink(DAQmxBase, Sink):
 
     def __init__(self, fs=200e3, output_line='/Dev1/ao0',
                  trigger_line='/Dev1/port0/line0',
-                 run_line='/Dev1/port0/line1', **kwargs):
+                 run_line='/Dev1/port0/line1', attenuator=None, **kwargs):
         variables = locals()
         kwargs = variables.pop('kwargs')
         for k, v in variables.items():
             setattr(self, k, v)
-        #Sink.__init__(self, **kwargs)
         DAQmxBase.__init__(self)
         Sink.__init__(self, **kwargs)
         self.write_size = int(self.fs * 1)
@@ -459,6 +458,11 @@ class DAQmxSink(DAQmxBase, Sink):
     def complete(self):
         return self.status() == self.samples_written
 
+    def get_hw_sf(self, best_sf):
+        if self.attenuator is None:
+            raise ValueError, 'Cannot control attenuation'
+        return self.attenuator.get_hw_sf(best_sf)
+
 
 class DAQmxAttenControl(DAQmxBase):
     '''
@@ -470,6 +474,10 @@ class DAQmxAttenControl(DAQmxBase):
     VOLUME_MAX = 31.5
     VOLUME_MIN = -95.5
     VOLUME_BITS = 16
+
+    # List of all possible gains that can be realized via hardware setting.
+    HW_GAINS = np.arange(VOLUME_MIN, VOLUME_MAX+VOLUME_STEP, VOLUME_STEP)
+    HW_SF = 10**(HW_GAINS/20.0)
 
     # This is limited by the input characteristics of the IC (right now the
     # chip needs at least 90us from the time the chip select line goes low to
@@ -743,3 +751,13 @@ class DAQmxAttenControl(DAQmxBase):
         ni.DAQmxWriteDigitalScalarU32(self._task_zc, True, -1,
                                       int(zero_crossing), None)
         ni.DAQmxWaitUntilTaskDone(self._task_zc, 1)
+
+    def get_hw_sf(self, sf):
+        '''
+        Return closest attenuation (as a scaling factor) that can be realized
+        via hardware.
+        '''
+        mask = self.HW_SF < sf
+        if mask.any():
+            return self.HW_SF[mask][-1]
+        return self.HW_SF[0]
