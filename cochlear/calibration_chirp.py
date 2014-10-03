@@ -23,7 +23,7 @@ from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
 from neurogen.calibration import Attenuation
-from neurogen.util import patodb
+from neurogen.util import patodb, dbtopa
 
 from nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
                      DAQmxAttenControl)
@@ -106,20 +106,26 @@ class ChirpCalData(AbstractData):
 
     def compute_transfer_functions(self, ref_mic_sens, ref_mic_gain,
                                    exp_mic_gain):
+
+        # The PSD is in V peak-to-peak
         ref_psd = self.ref_microphone.get_average_psd()
         exp_psd = self.exp_microphone.get_average_psd()
-        self.speaker_tf = ref_psd/ref_mic_sens
-        self.exp_mic_tf = exp_psd/self.speaker_tf
+
+        # Convert output of speaker to dB SPL
+        self.speaker_tf = patodb(ref_psd/ref_mic_sens)-ref_mic_gain
+
+        # Compute experiment microphone sensitivity (V/Pa)
+        self.exp_mic_tf = exp_psd/dbtopa(self.speaker_tf)
         self.frequency = self.ref_microphone.get_fftfreq()
 
-        # Computes the experiment microphone transfer function giving us the
-        # sensitivity in V/Pa
+        # Save the transfer function
         data = np.c_[self.frequency, self.speaker_tf]
         s_node = self.fh.create_array(self.store_node, 'speaker_tf', data)
         s_node._v_attrs['ref_mic_sens'] = ref_mic_sens
         data = np.c_[self.frequency, self.exp_mic_tf]
         self.fh.create_array(self.store_node, 'exp_mic_tf', data)
 
+        # Compute the calibration array
         calibration = []
         for v in (1e-9, 1, 10):
             spl = patodb(v/self.speaker_tf)
@@ -128,8 +134,8 @@ class ChirpCalData(AbstractData):
             gain = np.full_like(spl, exp_mic_gain)
             c = np.c_[self.frequency, voltage, gain, spl, phase]
             calibration.append(c)
-        calibration = np.c_[calibration]
-        self.fh.create_array(self.fh.root, 'exp_mic_cal', data)
+        calibration = np.concatenate(calibration)
+        self.fh.create_array(self.fh.root, 'exp_mic_cal', calibration)
 
 
 class ChirpCalController(DAQmxDefaults, AbstractController):
@@ -240,7 +246,11 @@ class ChirpCalController(DAQmxDefaults, AbstractController):
         self.epochs_acquired += 1
         if self.epochs_acquired == self.get_current_value('averages'):
             ref_mic_sens = self.get_current_value('ref_mic_sens')
-            self.model.data.compute_transfer_functions(ref_mic_sens)
+            ref_mic_gain = self.get_current_value('ref_mic_gain')
+            exp_mic_gain = self.get_current_value('exp_mic_gain')
+            self.model.data.compute_transfer_functions(ref_mic_sens,
+                                                       ref_mic_gain,
+                                                       exp_mic_gain)
             self.model.data.save(**dict(self.model.paradigm.items()))
             self.model.generate_plots()
             self.complete = True

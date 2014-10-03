@@ -51,6 +51,7 @@ class DAQmxBase(object):
 
     def __init__(self):
         self._tasks = []
+        self._state = 'initialized'
 
     def _create_task(self, name=None):
         '''
@@ -73,10 +74,12 @@ class DAQmxBase(object):
         return task
 
     def start(self):
+        self._state = 'running'
         for task in self._tasks:
             ni.DAQmxStartTask(task)
 
     def stop(self):
+        self._state = 'halted'
         for task in self._tasks:
             try:
                 ni.DAQmxStopTask(task)
@@ -84,6 +87,7 @@ class DAQmxBase(object):
                 pass
 
     def clear(self):
+        self._state = 'halted'
         for task in self._tasks:
             try:
                 ni.DAQmxClearTask(task)
@@ -382,6 +386,8 @@ class DAQmxSink(DAQmxBase, Sink):
 
     def get_write_size(self):
         # We don't want the buffering algorithm to get too far ahead of us
+        if self._state == 'halted':
+            return 0
         if self.samples_written == 0:
             return self.write_size
         result = ctypes.c_uint64()

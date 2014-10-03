@@ -1,10 +1,10 @@
-from traits.api import Instance, Float, Int, Any, push_exception_handler, Bool
+from traits.api import Instance, Float, Int, push_exception_handler, Bool
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
-                          HSplit, MenuBar, Menu, HGroup)
+                          HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 from enable.api import Component, ComponentEditor
 from pyface.api import ImageResource
-from chaco.api import LinearMapper, DataRange1D, PlotAxis
-from chaco.tools.api import ZoomTool
+from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
+                       create_line_plot)
 
 import numpy as np
 
@@ -33,8 +33,8 @@ ADC_FS = 50e3
 
 class ABRData(AbstractData):
 
-    waveforms = Any
-    waveform_node = Any
+    current_channel = Instance('experiment.channel.Channel')
+    waveform_node = Instance('tables.Group')
 
     def _waveform_node_default(self):
         return self.fh.create_group(self.store_node, 'waveforms')
@@ -48,29 +48,23 @@ class ABRData(AbstractData):
         self.current_channel = channel
         return channel
 
-    def _waveforms_default(self):
-        fh = self.store_node._v_file
-        return FileEpochChannel(node=fh.root, name='erp',
-                                epoch_size=self.epoch_size, fs=ADC_FS,
-                                dtype=np.double, use_checksum=True)
-
 
 class ABRParadigm(AbstractParadigm):
 
     kw = dict(context=True, log=True)
 
     # Signal acquisition settings
-    averages = Expression(20, **kw)
+    averages = Expression(10, **kw)
     window = Expression(10e-3, **kw)
     quick_threshold = Expression(550e-9, **kw)
-    reject_threshold = Expression(15e-6, **kw)
+    reject_threshold = Expression(15, **kw)
 
     # Stimulus settings
-    repetition_rate = Expression(10, **kw)
+    repetition_rate = Expression(40, **kw)
     frequency = Expression(1e3, **kw)
     duration = Expression(4e-3, **kw)
     ramp_duration = Expression(0.5e-3, **kw)
-    level = Expression(0, **kw)
+    level = Expression('ascending(np.arange(5, 80, 5), cycles=1)', **kw)
 
     traits_view = View(
         VGroup(
@@ -124,37 +118,59 @@ class ABRController(DAQmxDefaults, AbstractController):
     def stop_experiment(self, info=None):
         self.stop_requested = True
 
+    def stop(self, info=None):
+        self.iface_dac.clear()
+        self.iface_adc.clear()
+        self.iface_atten.clear()
+        self.state = 'halted'
+        self.model.data.save()
+
     def next_stimulus(self):
-        iface_atten = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
-                                        cs_line=self.VOLUME_CS,
-                                        data_line=self.VOLUME_SDI,
-                                        mute_line=self.VOLUME_MUTE,
-                                        zc_line=self.VOLUME_ZC,
-                                        hw_clock=self.DIO_CLOCK)
+        try:
+            self.refresh_context(evaluate=True)
+        except StopIteration:
+            # We are done with the experiment
+            self.stop()
+            return
+
+        epoch_duration = self.get_current_value('window')
+        frequency = self.get_current_value('frequency')
+        duration = self.get_current_value('duration')
+        ramp_duration = self.get_current_value('ramp_duration')
+        level = self.get_current_value('level')
+        repetition_rate = self.get_current_value('repetition_rate')
+
+        self.iface_atten = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
+                                             cs_line=self.VOLUME_CS,
+                                             data_line=self.VOLUME_SDI,
+                                             mute_line=self.VOLUME_MUTE,
+                                             zc_line=self.VOLUME_ZC,
+                                             hw_clock=self.DIO_CLOCK)
         self.iface_dac = DAQmxSink(name='sink', fs=self.dac_fs,
                                    calibration=Attenuation(),
                                    output_line=self.SPEAKER_OUTPUT,
                                    trigger_line=self.SPEAKER_TRIGGER,
                                    run_line=self.SPEAKER_RUN,
-                                   attenuator=iface_atten)
-        self.current_graph = Tone(name='tone') >> \
-            Cos2Envelope(name='envelope') >> \
-            self.iface_dac
-        self.refresh_context(evaluate=True)
-        epoch_duration = self.get_current_value('window')
+                                   attenuator=self.iface_atten,
+                                   duration=1.0/repetition_rate)
         self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
                                               epoch_duration=epoch_duration,
                                               input_line=self.ERP_INPUT,
                                               counter_line=self.ERP_COUNTER,
                                               trigger_line=self.ERP_TRIGGER,
                                               callback=self.poll)
+
+        tone = Tone(frequency=frequency, level=level, name='tone')
+        envelope = Cos2Envelope(duration=duration, rise_time=ramp_duration)
+        self.current_graph = tone >> envelope >> self.iface_dac
         self.iface_adc.setup()
-        self.model.plot.source = \
-            self.model.data.create_waveform_channel(self.current_trial)
+        self.model.abr_current.source = \
+            self.model.data.create_waveform_channel(self.current_trial,
+                                                    self.adc_fs, epoch_duration)
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
-        self.current_graph.queue_init('FIFO')
+        self.current_graph.queue_init('Interleaved FIFO')
         self.current_graph.set_value('tone.phase', 0)
         self.current_graph.queue_append(np.inf)
         self.current_graph.set_value('tone.phase', np.pi)
@@ -162,76 +178,63 @@ class ABRController(DAQmxDefaults, AbstractController):
 
         self.done = False
         self.current_trial += 1
+        self.current_repetitions = 0
+        self.current_valid_repetitions = 0
         self.iface_adc.start()
         self.current_graph.play_queue()
 
     def poll(self):
-        # Read in new data and save it.  Even if we've acquired enough averages,
-        # we should go ahead and read in any new data we can.
+        # Since we can use this function as an external callback for the niDAQmx
+        # library, we need to guard against repeated calls to the method after
+        # we have determined the current ABR is done.
+        if self.done:
+            return
+
+        # Read in new data
         waveform = self.iface_adc.read_analog(timeout=-1)
         self.model.data.current_channel.send(waveform)
         self.current_repetitions += 1
 
-        # Since we can use this function as an external callback for the niDAQmx
-        # library, we need to guard against repeated calls to the method after
-        # we have determined the current ABR is done.
-        if not self.done:
-            threshold = self.get_current_value('reject_threshold')
-            self.current_valid_repetitions = \
-                self.model.data.current_channel.get_n(threshold)
-            if self.current_valid_repetitions > \
-                    self.get_current_value('averages'):
-                self.done = True
-                if not self.stop_requested:
-                    self.iface_adc.clear()
-                    self.iface_dac.clear()
-                    self.iface_atten.clear()
-                    self.next_stimulus()
-                else:
-                    self.state = 'halted'
-                    self.model.data.save()
-
-    def set_frequency(self, value):
-        self.current_graph.set_value('tone.frequency', value)
-
-    def set_duration(self, value):
-        self.current_graph.set_value('envelope.duration', value)
-
-    def set_ramp_duration(self, value):
-        self.current_graph.set_value('envelope.rise_time', value)
-
-    def set_level(self, value):
-        self.current_graph.set_value('tone.level', value)
-
-    def set_repetition_rate(self, value):
-        self.current_graph.set_value('sink.duration', 1.0/value)
-
-    def set_window(self, value):
-        self.iface_adc.epoch_duration = value
-        self.model.data.epoch_size = int(value * self.adc_fs)
+        threshold = self.get_current_value('reject_threshold')
+        self.current_valid_repetitions = \
+            self.model.data.current_channel.get_n(threshold)
+        if self.current_valid_repetitions > \
+                self.get_current_value('averages'):
+            self.done = True
+            if not self.stop_requested:
+                self.iface_adc.clear()
+                self.iface_dac.clear()
+                self.iface_atten.clear()
+                self.model.add_plot_to_stack()
+                self.next_stimulus()
+            else:
+                self.stop()
 
     def set_reject_threshold(self, value):
-        self.model.plot.reject_threshold = value
+        self.model.abr_current.reject_threshold = value
 
     def calibrate_system(self, info=None):
         import calibration_chirp
         calibration_chirp.launch_gui(parent=info.ui.control)
 
-    def load_system_calibration(self):
-        print util.get_save_file('*_cal.hdf5')
+    def load_microphone_calibration(self):
+        print util.get_save_file('*_miccal.hdf5')
+
 
 class ABRExperiment(AbstractExperiment):
 
     paradigm = Instance(ABRParadigm, ())
     data = Instance(AbstractData, ())
-    plot = Instance(Component)
+    abr_current = Instance(Component)
+    abr_stack = Instance(Component)
 
-    def _plot_default(self):
+    def _abr_current_default(self):
         index_mapper = LinearMapper(range=DataRange1D(low=0, high=10e-3))
         value_mapper = LinearMapper(range=DataRange1D(low=-3.0, high=3.0))
-        plot = EpochChannelPlot(source=self.data.waveforms,
-                                value_mapper=value_mapper,
-                                index_mapper=index_mapper, bgcolor='white',
+        plot = EpochChannelPlot(value_mapper=value_mapper,
+                                index_mapper=index_mapper,
+                                bgcolor='white',
+                                update_rate=2,
                                 padding=[100, 50, 50, 75])
         axis = PlotAxis(orientation='left', component=plot,
                         tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
@@ -241,17 +244,27 @@ class ABRExperiment(AbstractExperiment):
                         tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
                         title='Time (msec)')
         plot.overlays.append(axis)
-        zoom = ZoomTool(plot, drag_button=None, axis="value")
-        plot.overlays.append(zoom)
         return plot
+
+    def _abr_stack_default(self):
+        return VPlotContainer(padding=50, spacing=25)
+
+    def add_plot_to_stack(self):
+        channel = self.data.current_channel
+        x = np.arange(channel.epoch_size)/channel.fs
+        y = channel.get_average()
+        plot = create_line_plot((x, y))
+        self.abr_stack.add(plot)
+        self.abr_stack.request_redraw()
 
     traits_view = View(
         HSplit(
             VGroup(
-                VGroup(
+                Tabbed(
                     Item('paradigm', style='custom', show_label=False,
                          width=200,
                          enabled_when='not handler.state=="running"'),
+                    Include('context_group'),
                     label='Paradigm',
                 ),
                 VGroup(
@@ -262,8 +275,11 @@ class ABRExperiment(AbstractExperiment):
                 ),
                 show_border=True,
             ),
-            VGroup(
-                Item('plot', editor=ComponentEditor(width=250, height=250)),
+            HGroup(
+                Item('abr_current',
+                     editor=ComponentEditor(width=100, height=100)),
+                Item('abr_stack',
+                     editor=ComponentEditor(width=100, height=300)),
                 show_labels=False,
             ),
         ),
@@ -298,8 +314,8 @@ class ABRExperiment(AbstractExperiment):
             ),
             Menu(
                 ActionGroup(
-                    Action(name='Load system calibration',
-                           action='load_system_calibration'),
+                    Action(name='Load microphone calibration',
+                           action='load_mic_cal'),
                 ),
                 ActionGroup(
                     Action(name='Calibrate reference microphone',
@@ -320,7 +336,6 @@ class ABRExperiment(AbstractExperiment):
 if __name__ == '__main__':
     import PyDAQmx as ni
     ni.DAQmxResetDevice('Dev1')
-    import logging
     with tables.open_file('test.hd5', 'w') as fh:
         data = ABRData(store_node=fh.root)
         experiment = ABRExperiment(data=data, paradigm=ABRParadigm())
