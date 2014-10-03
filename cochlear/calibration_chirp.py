@@ -23,6 +23,7 @@ from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
 from neurogen.calibration import Attenuation
+from neurogen.util import patodb
 
 from nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
                      DAQmxAttenControl)
@@ -103,19 +104,32 @@ class ChirpCalData(AbstractData):
                                 dtype=np.double, use_checksum=True)
         self.ref_microphone = node
 
-    def compute_transfer_functions(self, ref_mic_sens):
+    def compute_transfer_functions(self, ref_mic_sens, ref_mic_gain,
+                                   exp_mic_gain):
         ref_psd = self.ref_microphone.get_average_psd()
         exp_psd = self.exp_microphone.get_average_psd()
         self.speaker_tf = ref_psd/ref_mic_sens
         self.exp_mic_tf = exp_psd/self.speaker_tf
         self.frequency = self.ref_microphone.get_fftfreq()
 
-        fh = self.store_node._v_file
+        # Computes the experiment microphone transfer function giving us the
+        # sensitivity in V/Pa
         data = np.c_[self.frequency, self.speaker_tf]
-        s_node = fh.create_array(fh.root, 'speaker_tf', data)
+        s_node = self.fh.create_array(self.store_node, 'speaker_tf', data)
         s_node._v_attrs['ref_mic_sens'] = ref_mic_sens
         data = np.c_[self.frequency, self.exp_mic_tf]
-        fh.create_array(fh.root, 'exp_mic_tf', data)
+        self.fh.create_array(self.store_node, 'exp_mic_tf', data)
+
+        calibration = []
+        for v in (1e-9, 1, 10):
+            spl = patodb(v/self.speaker_tf)
+            phase = np.zeros_like(spl)
+            voltage = np.full_like(spl, v)
+            gain = np.full_like(spl, exp_mic_gain)
+            c = np.c_[self.frequency, voltage, gain, spl, phase]
+            calibration.append(c)
+        calibration = np.c_[calibration]
+        self.fh.create_array(self.fh.root, 'exp_mic_cal', data)
 
 
 class ChirpCalController(DAQmxDefaults, AbstractController):
