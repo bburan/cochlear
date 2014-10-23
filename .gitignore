@@ -3,3 +3,4 @@
 *.hdf5
 *.hd5
 *.hdf
+*.egg-info
