@@ -9,18 +9,19 @@ from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
 import numpy as np
 
 from neurogen.block_definitions import Tone, Cos2Envelope
-from neurogen.calibration import Attenuation
-from nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
-                     DAQmxAttenControl)
+from cochlear.nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
+                              DAQmxAttenControl)
 
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
-                        AbstractController, AbstractExperiment, util)
+                        AbstractController, AbstractExperiment)
 from experiment.channel import FileEpochChannel
 
 from experiment.plots.epoch_channel_plot import EpochChannelPlot
 
 import tables
+import PyDAQmx as ni
+
 
 from pkg_resources import resource_filename
 icon_dir = [resource_filename('experiment', 'icons')]
@@ -44,7 +45,9 @@ class ABRData(AbstractData):
         channel = FileEpochChannel(node=self.waveform_node,
                                    name='stack_{}'.format(trial),
                                    epoch_duration=epoch_duration, fs=fs,
-                                   dtype=np.double, use_checksum=True)
+                                   dtype=np.double, use_checksum=True,
+                                   use_shuffle=True, compression_level=9,
+                                   compression_type='blosc')
         self.current_channel = channel
         return channel
 
@@ -54,17 +57,17 @@ class ABRParadigm(AbstractParadigm):
     kw = dict(context=True, log=True)
 
     # Signal acquisition settings
-    averages = Expression(10, **kw)
+    averages = Expression(512, **kw)
     window = Expression(10e-3, **kw)
     quick_threshold = Expression(550e-9, **kw)
-    reject_threshold = Expression(15, **kw)
+    reject_threshold = Expression(np.inf, **kw)
 
     # Stimulus settings
     repetition_rate = Expression(40, **kw)
-    frequency = Expression(1e3, **kw)
+    frequency = Expression('exact_order([1e3, 2e3, 4e3, 8e3], cycles=1)', **kw)
     duration = Expression(4e-3, **kw)
     ramp_duration = Expression(0.5e-3, **kw)
-    level = Expression('ascending(np.arange(5, 80, 5), cycles=1)', **kw)
+    level = Expression('80', **kw)
 
     traits_view = View(
         VGroup(
@@ -95,12 +98,14 @@ class ABRParadigm(AbstractParadigm):
 
 class ABRController(DAQmxDefaults, AbstractController):
 
+    inear_cal = Instance('neurogen.calibration.SimpleCalibration')
+
     current_time_elapsed = Float(0)
     current_repetitions = Int(0)
     current_valid_repetitions = Int(0)
 
-    iface_adc = Instance('nidaqmx.TriggeredDAQmxSource')
-    iface_dac = Instance('nidaqmx.DAQmxSink')
+    iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
+    iface_dac = Instance('cochlear.nidaqmx.DAQmxSink')
 
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
@@ -126,6 +131,11 @@ class ABRController(DAQmxDefaults, AbstractController):
         self.model.data.save()
 
     def next_stimulus(self):
+        if self.iface_dac is not None:
+            self.iface_dac.clear()
+            self.iface_adc.clear()
+            self.iface_atten.clear()
+
         try:
             self.refresh_context(evaluate=True)
         except StopIteration:
@@ -146,27 +156,39 @@ class ABRController(DAQmxDefaults, AbstractController):
                                              mute_line=self.VOLUME_MUTE,
                                              zc_line=self.VOLUME_ZC,
                                              hw_clock=self.DIO_CLOCK)
-        self.iface_dac = DAQmxSink(name='sink', fs=self.dac_fs,
-                                   calibration=Attenuation(),
+
+        self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
+                                              epoch_duration=epoch_duration,
+                                              input_line=self.ERP_INPUT,
+                                              counter_line=self.AI_COUNTER,
+                                              trigger_line=self.AI_TRIGGER,
+                                              callback=self.poll)
+
+        self.iface_dac = DAQmxSink(name='sink',
+                                   fs=self.dac_fs,
+                                   calibration=self.inear_cal,
                                    output_line=self.SPEAKER_OUTPUT,
                                    trigger_line=self.SPEAKER_TRIGGER,
                                    run_line=self.SPEAKER_RUN,
                                    attenuator=self.iface_atten,
                                    duration=1.0/repetition_rate)
-        self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
-                                              epoch_duration=epoch_duration,
-                                              input_line=self.ERP_INPUT,
-                                              counter_line=self.ERP_COUNTER,
-                                              trigger_line=self.ERP_TRIGGER,
-                                              callback=self.poll)
-
         tone = Tone(frequency=frequency, level=level, name='tone')
         envelope = Cos2Envelope(duration=duration, rise_time=ramp_duration)
         self.current_graph = tone >> envelope >> self.iface_dac
-        self.iface_adc.setup()
-        self.model.abr_current.source = \
-            self.model.data.create_waveform_channel(self.current_trial,
-                                                    self.adc_fs, epoch_duration)
+        #self.model.abr_current.source = \
+        #    self.model.data.create_waveform_channel(self.current_trial,
+        #                                            self.adc_fs, epoch_duration)
+        self.model.data.create_waveform_channel(self.current_trial,
+                                                self.adc_fs, epoch_duration)
+
+        att = self.current_graph.get_best_attenuation()
+        self.iface_dac.fixed_attenuation = True
+        self.iface_dac.hw_attenuation = att
+
+        self.iface_atten.setup()
+        self.iface_atten.set_mute(False)
+        self.iface_atten.set_gains(-att)
+        self.iface_atten.clear()
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
@@ -180,6 +202,7 @@ class ABRController(DAQmxDefaults, AbstractController):
         self.current_trial += 1
         self.current_repetitions = 0
         self.current_valid_repetitions = 0
+        self.iface_adc.setup()
         self.iface_adc.start()
         self.current_graph.play_queue()
 
@@ -213,13 +236,6 @@ class ABRController(DAQmxDefaults, AbstractController):
     def set_reject_threshold(self, value):
         self.model.abr_current.reject_threshold = value
 
-    def calibrate_system(self, info=None):
-        import calibration_chirp
-        calibration_chirp.launch_gui(parent=info.ui.control)
-
-    def load_microphone_calibration(self):
-        print util.get_save_file('*_miccal.hdf5')
-
 
 class ABRExperiment(AbstractExperiment):
 
@@ -234,7 +250,7 @@ class ABRExperiment(AbstractExperiment):
         plot = EpochChannelPlot(value_mapper=value_mapper,
                                 index_mapper=index_mapper,
                                 bgcolor='white',
-                                update_rate=2,
+                                update_rate=40,
                                 padding=[100, 50, 50, 75])
         axis = PlotAxis(orientation='left', component=plot,
                         tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
@@ -253,7 +269,11 @@ class ABRExperiment(AbstractExperiment):
         channel = self.data.current_channel
         x = np.arange(channel.epoch_size)/channel.fs
         y = channel.get_average()
-        plot = create_line_plot((x, y))
+        plot = create_line_plot((x, y), color='black')
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
+                        title='Time (msec)')
+        plot.overlays.append(axis)
         self.abr_stack.add(plot)
         self.abr_stack.request_redraw()
 
@@ -287,9 +307,10 @@ class ABRExperiment(AbstractExperiment):
         height=500,
         width=800,
         toolbar=ToolBar(
+            '-',  # hack to get below group to appear first
             Action(name='Start', action='start',
                    image=ImageResource('1rightarrow', icon_dir),
-                   enabled_when='handler.state=="uninitialized"'),
+                   enabled_when='handler.inear_cal is not None'),
             Action(name='Stop', action='stop',
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
@@ -312,31 +333,14 @@ class ABRExperiment(AbstractExperiment):
                 ),
                 name='&Settings',
             ),
-            Menu(
-                ActionGroup(
-                    Action(name='Load microphone calibration',
-                           action='load_mic_cal'),
-                ),
-                ActionGroup(
-                    Action(name='Calibrate reference microphone',
-                           action='calibrate_reference_microphone'),
-                    Action(name='Calibrate system',
-                           action='calibrate_system'),
-                    Action(name='In-ear calibration',
-                           action='calibrate_in_ear'),
-                ),
-                name='&Calibration'
-            ),
-
         ),
         id='lbhb.ABRExperiment',
     )
 
 
-if __name__ == '__main__':
-    import PyDAQmx as ni
-    ni.DAQmxResetDevice('Dev1')
+def launch_gui(inear_cal, **kwargs):
     with tables.open_file('test.hd5', 'w') as fh:
         data = ABRData(store_node=fh.root)
         experiment = ABRExperiment(data=data, paradigm=ABRParadigm())
-        experiment.configure_traits(handler=ABRController())
+        controller = ABRController(inear_cal=inear_cal)
+        experiment.edit_traits(handler=controller, **kwargs)
