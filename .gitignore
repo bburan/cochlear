@@ -3,3 +3,7 @@
 *.hdf5
 *.hd5
 *.hdf
+*.pyc
+*.pyo
+*.egg-info
+*.swp
