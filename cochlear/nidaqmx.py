@@ -3,7 +3,6 @@ Classes for configuring and recording using NIDAQmx compatible devices
 '''
 
 # TODO setup DAQmxRegisterDoneEvent callback
-# TODO auto-reset devices on module load via DAQmxResetDevice?
 
 from __future__ import division
 
@@ -37,6 +36,7 @@ class DAQmxDefaults(object):
     SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
     SPEAKER_TRIGGER = '/{}/port0/line0'.format(DEV)
     SPEAKER_RUN = '/{}/port0/line2'.format(DEV)
+    DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
 
     VOLUME_CLK = '/{}/port0/line4'.format(DEV)
     VOLUME_CS = '/{}/port0/line1'.format(DEV)
@@ -453,7 +453,8 @@ class DAQmxSink(DAQmxBase, Sink):
         task_digital = self._create_task('digital output')
 
         # Setup analog output
-        ni.DAQmxCreateAOVoltageChan(task_analog, output_line, '', -5, 5,
+        ni.DAQmxCreateAOVoltageChan(task_analog, output_line, '',
+                                    self.voltage_min, self.voltage_max,
                                     ni.DAQmx_Val_Volts, '')
         ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
         ni.DAQmxCfgSampClkTiming(task_analog, '', self.fs, ni.DAQmx_Val_Rising,
@@ -677,10 +678,10 @@ class DAQmxAttenControl(DAQmxBase):
         if self._task_clk is not None:
             ni.DAQmxStartTask(self._task_clk)
 
+        # Use the soft mute option
         self.set_mute(False)
         self.set_zero_crossing(False)
-        #self.set_gain(self.VOLUME_MIN, self.VOLUME_MIN)
-        #self.set_gain(0, 0)
+        self.set_gain(self.VOLUME_MIN, self.VOLUME_MIN)
 
         self._tasks.extend((self._task_clk, self._task_zc, self._task_mute,
                             self._task_com))
@@ -791,6 +792,26 @@ class DAQmxAttenControl(DAQmxBase):
         Utility function for setting gain of right and left to same value
         '''
         self.set_gain(gain, gain)
+
+    def set_atten(self, right, left):
+        '''
+        Set the IC volume control to the desired attenuation.
+
+        This is a convenience method that allows one to specify the volume as an
+        attenuation rather than a gain as it passes the inverted values to
+        `set_gain`.
+        '''
+        self.set_gain(-right, -left)
+
+    def set_attens(self, attens):
+        '''
+        Utility function for setting atten of right and left to same value
+
+        This is a convenience method that allows one to specify the volume as an
+        attenuation rather than a gain as it passes the inverted values to
+        `set_gains`.
+        '''
+        self.set_gains([-a for a in attens])
 
     def set_mute(self, mute):
         '''

@@ -2,8 +2,7 @@ import os.path
 
 import tables
 
-from traits.api import (HasTraits, Property, List, Str, Instance,
-                        on_trait_change, cached_property)
+from traits.api import (HasTraits, Property, List, Str, Instance)
 from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
                           Controller)
 from pyface.api import ImageResource
@@ -15,6 +14,7 @@ from cochlear import settings
 from cochlear import calibration_chirp as cal_mic
 from cochlear import calibration_inear as cal_inear
 from cochlear import abr_experiment
+from cochlear import dpoae_experiment
 
 
 class ExperimentController(Controller):
@@ -23,20 +23,30 @@ class ExperimentController(Controller):
         cal_mic.launch_gui(parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
-    def run_inear_calibration(self, info):
+    def run_inear_cal_1(self, info):
         calibration = cal_inear.launch_gui(info.object.mic_calibration,
                                            parent=info.ui.control,
                                            kind='livemodal')
         if calibration is not None:
-            info.object.inear_calibration = calibration
+            info.object.inear_cal_1 = calibration
+
+    def run_inear_cal_2(self, info):
+        calibration = cal_inear.launch_gui(info.object.mic_calibration,
+                                           parent=info.ui.control,
+                                           kind='livemodal')
+        if calibration is not None:
+            info.object.inear_cal_2 = calibration
 
     def run_abr_experiment(self, info):
-        abr_experiment.launch_gui(info.object.inear_calibration,
+        abr_experiment.launch_gui(info.object.inear_cal_1,
                                   parent=info.ui.control,
                                   kind='livemodal')
 
     def run_dpoae_experiment(self, info):
-        pass
+        dpoae_experiment.launch_gui(info.object.inear_cal_1,
+                                    info.object.inear_cal_2,
+                                    info.object.mic_calibration,
+                                    parent=info.ui.control, kind='livemodal')
 
 
 class ExperimentSetup(HasTraits):
@@ -51,7 +61,8 @@ class ExperimentSetup(HasTraits):
     calibration = Str
 
     mic_calibration = Instance('neurogen.calibration.SimpleCalibration')
-    inear_calibration = Instance('neurogen.calibration.SimpleCalibration')
+    inear_cal_1 = Instance('neurogen.calibration.SimpleCalibration')
+    inear_cal_2 = Instance('neurogen.calibration.SimpleCalibration')
 
     def _calibrations_default(self):
         return self._update_calibrations()
@@ -91,19 +102,26 @@ class ExperimentSetup(HasTraits):
             Action(name='Mic cal',
                    image=ImageResource('media_record', icon_dir),
                    action='run_microphone_calibration'),
-            Action(name='In-ear cal',
+            Action(name='Right cal',
                    image=ImageResource('speaker', icon_dir),
                    enabled_when='mic_calibration is not None and '
                                 'animal is not None and '
                                 'experimenter is not None',
-                   action='run_inear_calibration'),
+                   action='run_inear_cal_1'),
+            Action(name='Left cal',
+                   image=ImageResource('speaker', icon_dir),
+                   enabled_when='mic_calibration is not None and '
+                                'animal is not None and '
+                                'experimenter is not None',
+                   action='run_inear_cal_1'),
             Action(name='ABR',
                    image=ImageResource('view_statistics', icon_dir),
-                   enabled_when='inear_calibration is not None',
+                   enabled_when='inear_cal_1 is not None',
                    action='run_abr_experiment'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
-                   enabled_when='inear_calibration is not None',
+                   enabled_when='inear_cal_1 is not None and '
+                                'inear_cal_2 is not None',
                    action='run_dpoae_experiment'),
         ),
     )
