@@ -8,10 +8,9 @@ from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
 
 import numpy as np
 
-from neurogen.block_definitions import Tone, Cos2Envelope
-from cochlear.nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxSink,
-                              DAQmxAttenControl)
-
+from neurogen.block_definitions import Tone, Cos2Envelope, Click
+from cochlear.nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxPlayer,
+                              DAQmxChannel, DAQmxAttenControl)
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
                         AbstractController, AbstractExperiment)
@@ -20,8 +19,6 @@ from experiment.channel import FileEpochChannel
 from experiment.plots.epoch_channel_plot import EpochChannelPlot
 
 import tables
-import PyDAQmx as ni
-
 
 from pkg_resources import resource_filename
 icon_dir = [resource_filename('experiment', 'icons')]
@@ -104,7 +101,7 @@ class ABRController(DAQmxDefaults, AbstractController):
     current_valid_repetitions = Int(0)
 
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
-    iface_dac = Instance('cochlear.nidaqmx.DAQmxSink')
+    iface_dac = Instance('cochlear.nidaqmx.DAQmxPlayer')
 
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
@@ -162,39 +159,41 @@ class ABRController(DAQmxDefaults, AbstractController):
                                               trigger_line=self.AI_TRIGGER,
                                               callback=self.poll)
 
-        self.iface_dac = DAQmxSink(name='sink',
-                                   fs=self.dac_fs,
-                                   calibration=self.inear_cal,
-                                   output_line=self.SPEAKER_OUTPUT,
-                                   trigger_line=self.SPEAKER_TRIGGER,
-                                   run_line=self.SPEAKER_RUN,
-                                   attenuator=self.iface_atten,
-                                   duration=1.0/repetition_rate)
-        tone = Tone(frequency=frequency, level=level, name='tone')
-        envelope = Cos2Envelope(duration=duration, rise_time=ramp_duration)
-        self.current_graph = tone >> envelope >> self.iface_dac
-        #self.model.abr_current.source = \
-        #    self.model.data.create_waveform_channel(self.current_trial,
-        #                                            self.adc_fs, epoch_duration)
+        self.iface_dac = DAQmxPlayer(fs=self.dac_fs,
+                                     output_line=self.LEFT_SPEAKER_OUTPUT,
+                                     trigger_line=self.SPEAKER_TRIGGER,
+                                     run_line=self.SPEAKER_RUN,
+                                     attenuator=self.iface_atten,
+                                     duration=1.0/repetition_rate)
+
+        #self.current_channel = \
+        #    Tone(frequency=frequency, level=level, name='tone') >> \
+        #    Cos2Envelope(duration=duration, rise_time=ramp_duration) >> \
+        #    DAQmxChannel(calibration=self.inear_cal,
+        #                 attenuator=self.iface_atten,
+        #                 attenuator_channel='left')
+        self.current_channel = \
+            Click(duration=10e-6, level=1, delay=0) >> \
+            DAQmxChannel(calibration=self.inear_cal,
+                         attenuator=self.iface_atten,
+                         attenuator_channel='left')
+
         self.model.data.create_waveform_channel(self.current_trial,
                                                 self.adc_fs, epoch_duration)
 
-        att = self.current_graph.get_best_attenuation()
-        self.iface_dac.fixed_attenuation = True
-        self.iface_dac.hw_attenuation = att
+        self.iface_dac.add_channel(self.current_channel)
 
         self.iface_atten.setup()
-        self.iface_atten.set_mute(False)
-        self.iface_atten.set_gains(-att)
+        self.iface_dac.set_best_attenuations()
         self.iface_atten.clear()
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
-        self.current_graph.queue_init('Interleaved FIFO')
-        self.current_graph.set_value('tone.phase', 0)
-        self.current_graph.queue_append(np.inf)
-        self.current_graph.set_value('tone.phase', np.pi)
-        self.current_graph.queue_append(np.inf)
+        self.iface_dac.queue_init('Interleaved FIFO')
+        #self.current_channel.set_value('tone.phase', 0)
+        self.iface_dac.queue_append(np.inf)
+        #self.current_channel.set_value('tone.phase', np.pi)
+        self.iface_dac.queue_append(np.inf)
 
         self.done = False
         self.current_trial += 1
@@ -202,7 +201,7 @@ class ABRController(DAQmxDefaults, AbstractController):
         self.current_valid_repetitions = 0
         self.iface_adc.setup()
         self.iface_adc.start()
-        self.current_graph.play_queue()
+        self.iface_dac.play_queue()
 
     def poll(self):
         # Since we can use this function as an external callback for the niDAQmx

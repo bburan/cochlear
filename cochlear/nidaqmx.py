@@ -7,11 +7,14 @@ Classes for configuring and recording using NIDAQmx compatible devices
 from __future__ import division
 
 import ctypes
+import unittest
 
 import PyDAQmx as ni
 import numpy as np
 
-from neurogen.sink import Sink
+from neurogen.channel import Channel
+from neurogen.player import Player, QueuedPlayerMixin, ThreadPlayerMixin
+from neurogen.blocks import ScalarInput
 
 import logging
 log = logging.getLogger(__name__)
@@ -33,10 +36,11 @@ class DAQmxDefaults(object):
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
     AI_TRIGGER = '/{}/PFI1'.format(DEV)
 
-    SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
     SPEAKER_TRIGGER = '/{}/port0/line0'.format(DEV)
     SPEAKER_RUN = '/{}/port0/line2'.format(DEV)
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
+    LEFT_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
+    RIGHT_SPEAKER_OUTPUT = '/{}/ao1'.format(DEV)
 
     VOLUME_CLK = '/{}/port0/line4'.format(DEV)
     VOLUME_CS = '/{}/port0/line1'.format(DEV)
@@ -182,12 +186,12 @@ class DAQmxSource(DAQmxBase):
     def read_analog(self, timeout=None, restart=False):
         if timeout is None:
             timeout = 0
-        samples = self.samples_available()
+        samps_per_chan = self.samples_available()
         result = ctypes.c_long()
-        analog_data = np.empty(samples, dtype=np.double)
-        ni.DAQmxReadAnalogF64(self._task_analog, samples, timeout,
-                              ni.DAQmx_Val_GroupByChannel, analog_data, samples,
-                              result, None)
+        analog_data = np.empty((self.channels, samps_per_chan), dtype=np.double)
+        ni.DAQmxReadAnalogF64(self._task_analog, samps_per_chan, timeout,
+                              ni.DAQmx_Val_GroupByChannel, analog_data,
+                              analog_data.size, result, None)
         log.debug('Read %d s/chan from %s', result.value, self.input_line)
         return analog_data.reshape((self.channels, -1))
 
@@ -282,7 +286,8 @@ class TriggeredDAQmxSource(DAQmxSource):
     acquisition without risk of losing data.
 
     Newer cards (e.g. X-series) support retriggerable tasks, so the approach
-    used here may not be necessary.
+    used here may not be necessary; however, it depends on how quickly the
+    X-series tasks can rearm the trigger.
     '''
 
     def __init__(self, fs=25e3, epoch_duration=10e-3, input_line='/Dev1/ai0',
@@ -406,13 +411,33 @@ class TriggeredDAQmxSource(DAQmxSource):
         ni.DAQmxReadCounterScalarU32(self._task_counter, 0, result, None)
         return result.value
 
+    def samples_available(self):
+        samples = super(TriggeredDAQmxSource, self).samples_available()
+        return int(np.floor(samples/self.epoch_size)*self.epoch_size)
 
-class DAQmxSink(DAQmxBase, Sink):
+
+class DAQmxChannel(Channel):
 
     # Based on testing of the PGA2310/OPA234/BUF634 circuit with volume control
     # set to 0 dB, this is the maximum allowable voltage without clipping.
     voltage_min = -1.5
     voltage_max = 1.5
+
+    attenuator = ScalarInput(default=None, unit=None)
+    attenuator_channel = ScalarInput(default=0, unit=None)
+
+    def set_attenuation(self, atten):
+        self.attenuator.set_atten(**{self.attenuator_channel: atten})
+        self.attenuation = atten
+
+    def get_nearest_attenuation(self, atten):
+        if self.attenuator is None:
+            raise ValueError('Channel does not have attenuation control')
+        print 'getting nearest'
+        return self.attenuator.get_nearest_atten(atten)
+
+
+class DAQmxPlayer(DAQmxBase, ThreadPlayerMixin, QueuedPlayerMixin, Player):
 
     def __init__(self, fs=200e3, output_line='/Dev1/ao0',
                  trigger_line='/Dev1/port0/line0',
@@ -422,7 +447,7 @@ class DAQmxSink(DAQmxBase, Sink):
         for k, v in variables.items():
             setattr(self, k, v)
         DAQmxBase.__init__(self)
-        Sink.__init__(self, **kwargs)
+        Player.__init__(self, **kwargs)
         self.write_size = int(self.fs * 1)
 
     def setup(self):
@@ -454,8 +479,7 @@ class DAQmxSink(DAQmxBase, Sink):
 
         # Setup analog output
         ni.DAQmxCreateAOVoltageChan(task_analog, output_line, '',
-                                    self.voltage_min, self.voltage_max,
-                                    ni.DAQmx_Val_Volts, '')
+                                    -5, 5, ni.DAQmx_Val_Volts, '')
         ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
         ni.DAQmxCfgSampClkTiming(task_analog, '', self.fs, ni.DAQmx_Val_Rising,
                                  ni.DAQmx_Val_ContSamps, int(self.fs))
@@ -485,10 +509,10 @@ class DAQmxSink(DAQmxBase, Sink):
     def write(self, attenuation, analog, trigger, running):
         analog_result = ctypes.c_long()
         digital_result = ctypes.c_long()
-        ni.DAQmxWriteAnalogF64(self._task_analog, len(analog), False, -1,
+        ni.DAQmxWriteAnalogF64(self._task_analog, analog.shape[-1], False, -1,
                                ni.DAQmx_Val_GroupByChannel,
-                               analog.astype(np.double), analog_result, None)
-
+                               analog.ravel().astype(np.double), analog_result,
+                               None)
         data = np.r_[trigger, running]
         ni.DAQmxWriteDigitalLines(self._task_digital, len(trigger), False, -1,
                                   ni.DAQmx_Val_GroupByChannel,
@@ -598,6 +622,8 @@ class DAQmxAttenControl(DAQmxBase):
         self.mute_line = mute_line
         self.zc_line = zc_line
         self.hw_clock = hw_clock
+        self._right_setting = None
+        self._left_setting = None
         super(DAQmxAttenControl, self).__init__()
 
     def _setup_serial_timer(self, timer):
@@ -681,7 +707,7 @@ class DAQmxAttenControl(DAQmxBase):
         # Use the soft mute option
         self.set_mute(False)
         self.set_zero_crossing(False)
-        self.set_gain(self.VOLUME_MIN, self.VOLUME_MIN)
+        self.set_atten(np.inf, np.inf)
 
         self._tasks.extend((self._task_clk, self._task_zc, self._task_mute,
                             self._task_com))
@@ -755,7 +781,7 @@ class DAQmxAttenControl(DAQmxBase):
         ni.DAQmxWaitUntilTaskDone(self._task_com, 1)
         ni.DAQmxStopTask(self._task_com)
 
-    def set_gain(self, right, left):
+    def set_gain(self, right=None, left=None):
         '''
         Set the IC volume control to the desired gain.
 
@@ -763,14 +789,15 @@ class DAQmxAttenControl(DAQmxBase):
         to the digital output.  There is no way to programatically check that
         the IC is configured properly.
 
-        If -np.inf is requested, the channel will be muted.
+        If -np.inf is provided, the channel will be muted.  If None is provided,
+        the setting for the channel will not change.
 
         Parameters
         ----------
-        right : {float, -np.inf}
+        right : {None, float, -np.inf}
             Desired gain for right channel in dB.  For attenuation, pass a
             negative value.
-        left : {float, -np.inf}i
+        left : {None, float, -np.inf}i
             Desired gain for left channel in dB.  For attenuation, pass a
             negative value.
 
@@ -783,9 +810,16 @@ class DAQmxAttenControl(DAQmxBase):
         ValueError if the requested gain is outside valid boundaries or is not
         a multiple of the gain step size.
         '''
-        log.debug('Setting gain to %f (right) and %f (left)', right, left)
+        log.debug('Setting gain to %r (right) and %r (left)', right, left)
+        if right is None:
+            right = self._right_setting
+        if left is None:
+            left = self._left_setting
+        print right, left
         bits = self._gain_to_bits(right, left)
         self._send_bits(bits)
+        self._right_setting = right
+        self._left_setting = left
 
     def set_gains(self, gain):
         '''
@@ -793,15 +827,23 @@ class DAQmxAttenControl(DAQmxBase):
         '''
         self.set_gain(gain, gain)
 
-    def set_atten(self, right, left):
+    def set_atten(self, right=None, left=None):
         '''
         Set the IC volume control to the desired attenuation.
 
         This is a convenience method that allows one to specify the volume as an
         attenuation rather than a gain as it passes the inverted values to
         `set_gain`.
+
+        .. note::
+            Be sure to set attenuation to np.inf if you want to mute the
+            channel instead of -np.inf.
         '''
-        self.set_gain(-right, -left)
+        if right is not None:
+            right = -right
+        if left is not None:
+            left = -left
+        self.set_gain(right, left)
 
     def set_attens(self, attens):
         '''
@@ -871,9 +913,6 @@ def get_bits(word, n, order='big-endian'):
         return bitword
     else:
         raise ValueError('Byte order {} not recognized'.format(order))
-
-
-import unittest
 
 
 class TestDAQmxAttenControl(unittest.TestCase):
