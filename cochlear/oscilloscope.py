@@ -46,11 +46,11 @@ from experiment.util import load_instance, dump_instance
 
 from traitsui.menu import MenuBar, Menu, ActionGroup, Action
 
-CHANNELS = 1
+CHANNELS = 5
 PHYSIOLOGY_WILDCARD = get_config('PHYSIOLOGY_WILDCARD')
 SPIKE_SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
 SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
-VOLTAGE_SCALE = 1e3
+VOLTAGE_SCALE = 1e6
 PHYSIOLOGY_ROOT = 'c:/data'
 
 from nidaqmx import ContinuousDAQmxSource
@@ -111,7 +111,7 @@ class PhysiologyController(Controller):
 
     def setup_physiology(self):
         self.buffer_raw = \
-            ContinuousDAQmxSource(input_line='/Dev1/ai0',
+            ContinuousDAQmxSource(input_line='/Dev1/ai0:4',
                                   callback=self.monitor_physiology,
                                   callback_samples=5e3)
         self.buffer_raw.setup()

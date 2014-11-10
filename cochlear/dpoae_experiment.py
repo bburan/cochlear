@@ -196,7 +196,8 @@ class DPOAEController(DAQmxDefaults, AbstractController):
                                                 response_window)
 
         self.iface_atten.setup()
-        self.iface_dac.set_best_attenuations()
+        print 'attens (L then R, f1 then f2)', \
+            self.iface_dac.set_best_attenuations()
         self.iface_atten.clear()
 
         self.iface_dac.queue_init('FIFO')
@@ -221,8 +222,10 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.model.data.current_channel.send(waveform)
         self.current_repetitions += len(waveform)
 
+        #time_averages = self.get_current_value('time_averages')
+        #if (self.current_repetitions % time_averages) == 0:
+
         if self.current_repetitions >= self.get_current_value('n_stimuli'):
-            print 'done'
             self.done = True
             if not self.stop_requested:
                 self.iface_adc.clear()
@@ -238,7 +241,7 @@ class DPOAEExperiment(AbstractExperiment):
 
     paradigm = Instance(DPOAEParadigm, ())
     data = Instance(AbstractData, ())
-    mic_cal = Instance('neurogen.calibration.SimpleCalibration')
+    exp_mic_sens = Instance('numpy.ndarray')
 
     container = Instance(Component)
 
@@ -263,9 +266,8 @@ class DPOAEExperiment(AbstractExperiment):
         frequency = channel.get_fftfreq()
         averages = self.paradigm.time_averages
 
-        mic_vrms = channel.get_average_psd(waveform_averages=averages,
-                                           vrms=True)
-        plot = create_line_plot((frequency[1:], db(mic_vrms[1:], 1e-3)),
+        mic_rms = channel.get_average_psd(waveform_averages=averages, rms=True)
+        plot = create_line_plot((frequency[1:], db(mic_rms[1:], 1e-3)),
                                 color='black')
         plot.index_mapper = index_mapper
         axis = PlotAxis(orientation='bottom', component=plot,
@@ -276,17 +278,17 @@ class DPOAEExperiment(AbstractExperiment):
         plot.underlays.append(axis)
         container.insert(0, plot)
 
-        inear_db = self.mic_cal.get_spl(frequency, mic_vrms)
-        inear_db_spl = inear_db-self.paradigm.exp_mic_gain
-        plot = create_line_plot((frequency[1:], inear_db_spl[1:]),
-                                color='black')
-        plot.index_mapper = index_mapper
-        axis = PlotAxis(orientation='bottom', component=plot,
-                        title='Frequency (Hz)')
-        plot.underlays.append(axis)
-        axis = PlotAxis(orientation='left', component=plot, title='Inear SPL')
-        plot.underlays.append(axis)
-        container.insert(0, plot)
+        #inear_db = self.mic_cal.get_spl(frequency, mic_vrms)
+        #inear_db_spl = inear_db-self.paradigm.exp_mic_gain
+        #plot = create_line_plot((frequency[1:], inear_db_spl[1:]),
+        #                        color='black')
+        #plot.index_mapper = index_mapper
+        #axis = PlotAxis(orientation='bottom', component=plot,
+        #                title='Frequency (Hz)')
+        #plot.underlays.append(axis)
+        #axis = PlotAxis(orientation='left', component=plot, title='Inear SPL')
+        #plot.underlays.append(axis)
+        #container.insert(0, plot)
         self.container = container
 
     traits_view = View(
@@ -336,11 +338,11 @@ class DPOAEExperiment(AbstractExperiment):
     )
 
 
-def launch_gui(inear_cal_0, inear_cal_1, mic_cal, **kwargs):
+def launch_gui(inear_cal_0, inear_cal_1, exp_mic_sens, **kwargs):
     with tables.open_file('test.hd5', 'w') as fh:
         data = DPOAEData(store_node=fh.root)
         experiment = DPOAEExperiment(data=data, paradigm=DPOAEParadigm(),
-                                     mic_cal=mic_cal)
+                                     exp_mic_sens=exp_mic_sens)
         controller = DPOAEController(inear_cal_0=inear_cal_0,
                                      inear_cal_1=inear_cal_1)
         experiment.edit_traits(handler=controller, **kwargs)

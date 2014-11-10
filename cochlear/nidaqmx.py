@@ -8,6 +8,7 @@ from __future__ import division
 
 import ctypes
 import unittest
+import time
 
 import PyDAQmx as ni
 import numpy as np
@@ -21,9 +22,13 @@ log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 
+################################################################################
+# Current configuration of niDAQmx hardware
+################################################################################
 class DAQmxDefaults(object):
     '''
-    Define a set of default lines that are typically hard-wired
+    Define defaults for configuring the niDAQmx tasks.  Often we have lines
+    hard-wired for certain purposes, so we need to use these lines.
     '''
     DEV = 'Dev1'
 
@@ -35,9 +40,12 @@ class DAQmxDefaults(object):
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
     AI_TRIGGER = '/{}/PFI1'.format(DEV)
+    AI_RUN = None
+    AI_RANGE = 10
 
-    SPEAKER_TRIGGER = '/{}/port0/line0'.format(DEV)
-    SPEAKER_RUN = '/{}/port0/line2'.format(DEV)
+    AO_TRIGGER = '/{}/port0/line0'.format(DEV)
+    AO_RUN = '/{}/port0/line2'.format(DEV)
+    AO_RANGE = 10
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
     LEFT_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
     RIGHT_SPEAKER_OUTPUT = '/{}/ao1'.format(DEV)
@@ -49,32 +57,321 @@ class DAQmxDefaults(object):
     VOLUME_ZC = '/{}/port1/line5'.format(DEV)
     DIO_CLOCK = '/{}/FreqOut'.format(DEV)
 
+    TRIGGER_DURATION = 10e-3
 
+
+################################################################################
+# Utility functions
+################################################################################
+def get_bits(word, n, order='big-endian'):
+    bitword = [(word >> i) & 1 for i in range(n)]
+    if order == 'big-endian':
+        return bitword[::-1]
+    elif order == 'little-endian':
+        return bitword
+    else:
+        raise ValueError('Byte order {} not recognized'.format(order))
+
+
+################################################################################
+# Functions for configuring common niDAQmx tasks
+################################################################################
+def create_task(name=None):
+    '''
+    Create niDAQmx task
+
+    Parameters
+    ----------
+    name : {None, str}
+        Task name (optional)
+
+    Returns
+    -------
+    task : ctypes pointer
+        Pointer to niDAQmx task
+    '''
+    if name is None:
+        name = ''
+    task = ni.TaskHandle(0)
+    ni.DAQmxCreateTask(name, ctypes.byref(task))
+    return task
+
+
+def create_event_timer(trigger, fs, counter='/Dev1/Ctr0',
+                       clock='ao/SampleClock', task=None):
+    '''
+    Create timer to report event timestamps
+
+    Parameters
+    ----------
+    trigger : str
+        Line to monitor for trigger
+    counter : str
+        Which counter channel to use
+    clock : str
+        Timebase for counter.  The value read from the counter will be in
+        units of the specified clock.
+    task : {None, niDAQmx task}
+        If None, a new task will be created.
+
+    Returns
+    -------
+    task : niDAQmx task
+        Configured and committed task
+    '''
+    if task is None:
+        task = create_task()
+    ni.DAQmxCreateCICountEdgesChan(task, counter, '', ni.DAQmx_Val_Rising, 0,
+                                   ni.DAQmx_Val_CountUp)
+    ni.DAQmxSetCICountEdgesTerm(task, counter, clock)
+    ni.DAQmxCfgSampClkTiming(task, trigger, fs, ni.DAQmx_Val_Rising,
+                             ni.DAQmx_Val_FiniteSamps, 500)
+    ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
+    return task
+
+
+def create_continuous_ai(ai, fs, expected_range=10, callback=None,
+                         callback_samples=None, task_analog=None):
+    if task_analog is None:
+        task_analog = create_task()
+    vlb, vub = -expected_range, expected_range
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, vlb, vub,
+                                ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCfgSampClkTiming(task_analog, None, fs, ni.DAQmx_Val_Rising,
+                             ni.DAQmx_Val_ContSamps, 0)
+    ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
+    if callback is not None:
+        self.create_everynsamples_callback(task_analog, callback,
+                                            callback_samples)
+    return task_analog
+
+
+def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
+                            counter=None, run=None, callback=None,
+                            task_analog=None, task_record=None,
+                            trigger_duration=DAQmxDefaults.TRIGGER_DURATION):
+    '''
+    Create retriggerable data acquisition
+
+    Parameters
+    ----------
+    ai : str
+        Line to acquire data from
+    trigger : str
+        Line to monitor for trigger
+    counter : str
+        Counter to use for controlling data acquisition.  Note that this
+        type of data acquisition requires the use of paired counters.  Ctr0
+        will be paired with Ctr1, Ctr2 will be paired with Ctr3, etc.  If
+        your device only has two counters, then you cannot use an event
+        timer as well.  The counters are hardwired together (i.e. if you
+        specify '/Dev1/Ctr0' or '/Dev1/Ctr1', the other counter in the pair
+        will automatically be reserved).
+    task_analog : {None, niDAQmx task}
+        Task to use for reading analog data in.  If None, a new task will be
+        created.
+    task_record : {None, niDAQmx task}
+        Task to use for controlling record counter.  If None, a new task
+        will be created.
+
+    Returns
+    -------
+    task_analog
+        Configured and committed task for analog data
+    task_record
+        Configured and committed task for triggering acquisition of analog
+        data.
+    cb_ptr
+        Pointer to the niDAQmx C callback.  This needs to be kept in program
+        memory by keeping it assigned to a variable name otherwise the callback
+        will get garbage-collected.
+
+    Limitations
+    -----------
+    Triggered data acquisition on M-series cards requires two counters (the
+    second counter is implied based on which one is hard-wired to the specified
+    counter, see device manual for details).  This means that if your device
+    has only two counters, you cannot use the second counter to generate
+    hardware-timed timestamps.
+
+    Task implementation details
+    ---------------------------
+    This uses an onboard device counter which is triggered by the rising edge
+    of a digital trigger (must be a PFI or ChangeDetectionEvent).  The counter
+    will generate a series of pulses for the specified acquisition duration at
+    the specified acquisition rate.  This allows us to continuously spool
+    epoch-based data to a buffer and supports very high rates of epoch
+    acquisition without risk of losing data.
+
+    Newer cards (e.g. X-series) support retriggerable tasks, so the approach
+    used here may not be necessary; however, it depends on how quickly the
+    X-series tasks can rearm the trigger.
+    '''
+    if task_analog is None:
+        task_analog = create_task()
+    if task_record is None:
+        task_record = create_task()
+    vlb, vub = -expected_range, expected_range
+
+    # Set up the analog input to continously acquire samples.  However,
+    # since it's tied to the internal output of the counter, it will only
+    # acquire when the counter is active.  Since the counter only runs for a
+    # finite number of samples after each trigger, this is effectively a
+    # triggered
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, vlb, vub,
+                                ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCfgSampClkTiming(task_analog, counter+'InternalOutput', fs,
+                             ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
+                             epoch_size)
+    ni.DAQmxSetBufInputBufSize(task_analog, epoch_size*1000)
+
+    ni.DAQmxCreateCOPulseChanFreq(task_record, counter, '', ni.DAQmx_Val_Hz,
+                                  ni.DAQmx_Val_Low, 0, fs, 0.5)
+    ni.DAQmxCfgImplicitTiming(task_record, ni.DAQmx_Val_FiniteSamps, epoch_size)
+    ni.DAQmxCfgDigEdgeStartTrig(task_record, trigger, ni.DAQmx_Val_Rising)
+
+    # Ensure trigger rearms after each detection event
+    ni.DAQmxSetStartTrigRetriggerable(task_record, True)
+    ni.DAQmxSetDigEdgeStartTrigDigFltrMinPulseWidth(task_record,
+                                                    trigger_duration*0.5)
+
+    ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
+    ni.DAQmxTaskControl(task_record, ni.DAQmx_Val_Task_Commit)
+
+    if callback is not None:
+        cb_ptr = create_everynsamples_callback(callback, epoch_size,
+                                               task_analog)
+    else:
+        cb_ptr = None
+
+    return task_analog, task_record, cb_ptr
+
+
+def create_continuous_ao(ao, trigger, run, fs,
+                         expected_range=DAQmxDefaults.AO_RANGE,
+                         task_analog=None, task_digital=None):
+    if task_analog is None:
+        task_analog = create_task()
+    if task_digital is None:
+        task_digital = create_task()
+    vmin, vmax = -expected_range, expected_range
+
+    # Setup analog output
+    ni.DAQmxCreateAOVoltageChan(task_analog, ao, '', vmin, vmax,
+                                ni.DAQmx_Val_Volts, '')
+    ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
+    ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
+                             ni.DAQmx_Val_ContSamps, int(fs))
+
+    # Set up trigger line
+    do = ','.join([trigger, run])
+    ni.DAQmxCreateDOChan(task_digital, do, '', ni.DAQmx_Val_ChanPerLine)
+    ni.DAQmxSetWriteRegenMode(task_digital, ni.DAQmx_Val_DoNotAllowRegen)
+    ni.DAQmxCfgSampClkTiming(task_digital, 'ao/SampleClock', fs,
+                             ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
+                             int(fs))
+
+    # Commit the tasks so we can catch resource errors early
+    ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
+    ni.DAQmxTaskControl(task_digital, ni.DAQmx_Val_Task_Commit)
+
+    # Log configuration info regarding task
+    result = ctypes.c_uint32()
+    ni.DAQmxGetBufOutputBufSize(task_analog, result)
+    log.debug('AO buffer size %d', result.value)
+    ni.DAQmxGetBufOutputOnbrdBufSize(task_analog, result)
+    log.debug('AO onboard buffer size %d', result.value)
+    ni.DAQmxGetBufOutputBufSize(task_digital, result)
+    log.debug('DO buffer size %d', result.value)
+    ni.DAQmxGetBufOutputOnbrdBufSize(task_digital, result)
+    log.debug('DO onboard buffer size %d', result.value)
+
+    return task_analog, task_digital
+
+
+def create_everynsamples_callback(callback, samples, task):
+    def event_cb(task, event_type, n_samples, data):
+        callback()
+        return 0
+    log.debug('Configuring every N samples callback with %d samples', samples)
+    cb_ptr = ni.DAQmxEveryNSamplesEventCallbackPtr(event_cb)
+    event_type = ni.DAQmx_Val_Acquired_Into_Buffer
+    ni.DAQmxRegisterEveryNSamplesEvent(task, event_type, int(samples), 0,
+                                       cb_ptr, None)
+    return cb_ptr
+
+
+def create_change_detect_callback(callback, rising=None, falling=None,
+                                  task=None):
+    '''
+    Set up change detection on line(s) with Python callback
+
+    Parameters
+    ----------
+    callback : callable
+        Python function to call on event.
+    rising : {None, str}
+        Line to monitor for rising edge
+    falling : {None, str}
+        Line to monitor for falling edge
+    '''
+    if task is None:
+        task = create_task()
+    if rising is None and falling is None:
+        raise ValueError('Must provide at least one line')
+    if rising is None:
+        rising = ''
+    if falling is None:
+        falling = ''
+
+    line = rising if rising == falling else ','.join((rising, falling))
+    ni.DAQmxCreateDIChan(task, line, '', ni.DAQmx_Val_ChanForAllLines)
+    ni.DAQmxCfgChangeDetectionTiming(task, rising, falling,
+                                     ni.DAQmx_Val_ContSamps, 100)
+
+    # Pointers to classmethods are not supported by ctypes, so we need to take
+    # advantage of function closure to maintain a reference to self.  Must
+    # return 0 to keep NIDAQmx happy (NIDAQmx expects all functions to return 0
+    # to indicate success.  A non-zero return value indicates there was a
+    # nerror).
+    def event_cb(task, signal_ID, data):
+        callback()
+        return 0
+
+    # Binding the pointer to an attribute on self seems to be necessary
+    # to ensure the callback function does not disappear (presumably it
+    # gets garbage-collected otherwise)
+    _change_detect_callback_ptr = ni.DAQmxSignalEventCallbackPtr(event_cb)
+    ni.DAQmxRegisterSignalEvent(task, ni.DAQmx_Val_ChangeDetectionEvent, 0,
+                                _change_detect_callback_ptr, None)
+
+    ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
+    return task, _change_detect_callback_ptr
+
+
+def samples_available(task, epoch_size=None):
+    result = ctypes.c_uint32()
+    ni.DAQmxGetReadAvailSampPerChan(task, result)
+    samples = result.value
+    if epoch_size is not None:
+        samples = int(np.floor(samples/epoch_size)*epoch_size)
+    return samples
+
+
+def num_channels(task):
+    result = ctypes.c_uint32()
+    ni.DAQmxGetTaskNumChans(task, result)
+    return result.value
+
+
+################################################################################
+# Primary interface for DAQ
+################################################################################
 class DAQmxBase(object):
 
     def __init__(self):
         self._tasks = []
         self._state = 'initialized'
-
-    def _create_task(self, name=None):
-        '''
-        Create niDAQmx task
-
-        Parameters
-        ----------
-        name : {None, str}
-            Task name (optional)
-
-        Returns
-        -------
-        task : ctypes pointer
-            Pointer to niDAQmx task
-        '''
-        if name is None:
-            name = ''
-        task = ni.TaskHandle(0)
-        ni.DAQmxCreateTask(name, ctypes.byref(task))
-        return task
 
     def start(self):
         self._state = 'running'
@@ -102,88 +399,7 @@ class DAQmxSource(DAQmxBase):
     '''
     Read data from device
     '''
-
-    def register_change_detect_callback(self, callback, rising=None,
-                                        falling=None):
-        '''
-        Set up change detection on line(s) with Python callback
-
-        Parameters
-        ----------
-        callback : callable
-            Python function to call on event.
-        rising : {None, str}
-            Line to monitor for rising edge
-        falling : {None, str}
-            Line to monitor for falling edge
-        '''
-        if rising is None and falling is None:
-            raise ValueError('Must provide at least one line')
-        if rising is None:
-            rising = ''
-        if falling is None:
-            falling = ''
-        self._change_detect_callback = callback
-        task = self._create_task()
-        line = rising if rising == falling else ','.join((rising, falling))
-        ni.DAQmxCreateDIChan(task, line, '', ni.DAQmx_Val_ChanForAllLines)
-        ni.DAQmxCfgChangeDetectionTiming(task, rising, falling,
-                                         ni.DAQmx_Val_ContSamps, 100)
-
-        # Pointers to classmethods are not supported by ctypes, so we need
-        # to take advantage of function closure to maintain a reference to
-        # self.  Must return 0 to keep NIDAQmx happy (NIDAQmx expects all
-        # functions to return 0 to indicate success.  A non-zero return
-        # value indicates there was a nerror).
-        def event_cb(task, signal_ID, data):
-            self._change_detect_callback()
-            return 0
-
-        # Binding the pointer to an attribute on self seems to be necessary
-        # to ensure the callback function does not disappear (presumably it
-        # gets garbage-collected otherwise)
-        self._change_detect_callback_ptr = \
-            ni.DAQmxSignalEventCallbackPtr(event_cb)
-        ni.DAQmxRegisterSignalEvent(task, ni.DAQmx_Val_ChangeDetectionEvent, 0,
-                                    self._change_detect_callback_ptr, None)
-
-        ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
-        self._task_change_detect = task
-        self._tasks.append(task)
-
-    def create_event_timer(self, trigger, counter='/Dev1/Ctr0',
-                           clock='ao/SampleClock', task=None):
-        '''
-        Create timer to report event timestamps
-
-        Parameters
-        ----------
-        trigger : str
-            Line to monitor for trigger
-        counter : str
-            Which counter channel to use
-        clock : str
-            Timebase for counter.  The value read from the counter will be in
-            units of the specified clock.
-        task : {None, niDAQmx task}
-            If None, a new task will be created.
-
-        Returns
-        -------
-        task : niDAQmx task
-            Configured and committed task
-        '''
-        if task is None:
-            task = self._create_task()
-        ni.DAQmxCreateCICountEdgesChan(task, counter, '', ni.DAQmx_Val_Rising,
-                                       0, ni.DAQmx_Val_CountUp)
-        ni.DAQmxSetCICountEdgesTerm(task, counter, clock)
-        ni.DAQmxCfgSampClkTiming(task, trigger, self.fs, ni.DAQmx_Val_Rising,
-                                 ni.DAQmx_Val_FiniteSamps, 500)
-        ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
-        return task
-
-    def read_analog(self, timeout=None, restart=False):
+    def read_analog(self, timeout=None):
         if timeout is None:
             timeout = 0
         samps_per_chan = self.samples_available()
@@ -195,33 +411,11 @@ class DAQmxSource(DAQmxBase):
         log.debug('Read %d s/chan from %s', result.value, self.input_line)
         return analog_data.reshape((self.channels, -1))
 
-    def samples_available(self):
-        result = ctypes.c_uint32()
-        ni.DAQmxGetReadAvailSampPerChan(self._task_analog, result)
-        return result.value
-
-    def create_everynsamples_callback(self, task, callback, samples):
-        if samples is None:
-            raise ValueError("Must specify number of samples for callback")
-        self._everynsamples_cb = callback
-
-        def event_cb(task, event_type, n_samples, data):
-            self._everynsamples_cb()
-            return 0
-
-        log.debug('Configuring every N samples callback with %d samples',
-                  samples)
-        self._everynsamples_cb_ptr = \
-            ni.DAQmxEveryNSamplesEventCallbackPtr(event_cb)
-        event_type = ni.DAQmx_Val_Acquired_Into_Buffer
-        ni.DAQmxRegisterEveryNSamplesEvent(task, event_type, int(samples), 0,
-                                           self._everynsamples_cb_ptr, None)
-
 
 class ContinuousDAQmxSource(DAQmxSource):
 
     def __init__(self, fs=25e3, input_line='/Dev1/ai0', callback=None,
-                 callback_samples=None):
+                 callback_samples=None, expected_range=None):
         '''
         Parameters
         ----------
@@ -240,59 +434,22 @@ class ContinuousDAQmxSource(DAQmxSource):
             setattr(self, k, v)
 
     def setup(self):
-        self._task_analog = self.create_continuous_ai(self.input_line,
-                                                      self.callback,
-                                                      self.callback_samples)
+        self._task_analog = create_continuous_ai(self.input_line, self.callback,
+                                                 self.callback_samples)
         self._tasks.append(self._task_analog)
-        result = ctypes.c_uint32()
-        ni.DAQmxGetTaskNumChans(self._task_analog, result)
-        self.channels = result.value
+        self.channels = num_channels(self._task_analog)
         log.debug('Configured retriggerable AI with %d channels', self.channels)
-
-    def create_continuous_ai(self, ai, callback=None, callback_samples=None,
-                             task_analog=None):
-        if task_analog is None:
-            task_analog = self._create_task()
-        ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, -1.0,
-                                    1.0, ni.DAQmx_Val_Volts, '')
-        ni.DAQmxCfgSampClkTiming(task_analog, None, self.fs,
-                                 ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps, 0)
-        ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
-        if callback is not None:
-            self.create_everynsamples_callback(task_analog, callback,
-                                               callback_samples)
-        return task_analog
 
 
 class TriggeredDAQmxSource(DAQmxSource):
-    '''
-    Acquire epochs of data triggered off of an external signal
 
-    Limitations
-    -----------
-    Triggered data acquisition on M-series cards requires two counters (the
-    second counter is implied based on which one is hard-wired to the specified
-    counter, see device manual for details).  This means that if your device
-    has only two counters, you cannot use the second counter to generate
-    hardware-timed timestamps.
-
-    Task implementation details
-    ---------------------------
-    This uses an onboard device counter which is triggered by the rising edge
-    of a digital trigger (must be a PFI or ChangeDetectionEvent).  The counter
-    will generate a series of pulses for the specified acquisition duration at
-    the specified acquisition rate.  This allows us to continuously spool
-    epoch-based data to a buffer and supports very high rates of epoch
-    acquisition without risk of losing data.
-
-    Newer cards (e.g. X-series) support retriggerable tasks, so the approach
-    used here may not be necessary; however, it depends on how quickly the
-    X-series tasks can rearm the trigger.
-    '''
-
-    def __init__(self, fs=25e3, epoch_duration=10e-3, input_line='/Dev1/ai0',
-                 counter_line='/Dev1/Ctr0', trigger_line='/Dev1/PFI1',
-                 run_line=None, trigger_duration=1e-3, callback=None):
+    def __init__(self, input_line, fs, epoch_duration,
+                 trigger_line=DAQmxDefaults.AI_TRIGGER,
+                 expected_range=DAQmxDefaults.AI_RANGE,
+                 counter_line=DAQmxDefaults.AI_COUNTER,
+                 run_line=DAQmxDefaults.AI_RUN,
+                 trigger_duration=DAQmxDefaults.TRIGGER_DURATION,
+                 callback=None):
         '''
         Parameters
         ----------
@@ -324,87 +481,14 @@ class TriggeredDAQmxSource(DAQmxSource):
         self.epoch_size = int(epoch_duration * fs)
 
     def setup(self):
-        self._task_analog, self._task_digital = \
-            self.create_retriggerable_ai(self.input_line, self.trigger_line,
-                                         self.counter_line, self.run_line,
-                                         self.callback)
+        self._task_analog, self._task_digital, self._cb_ptr = \
+            create_retriggerable_ai(self.input_line, self.fs, self.epoch_size,
+                                    self.trigger_line, self.expected_range,
+                                    self.counter_line, self.run_line,
+                                    self.callback)
         self._tasks.extend((self._task_analog, self._task_digital))
-
-        result = ctypes.c_uint32()
-        ni.DAQmxGetTaskNumChans(self._task_analog, result)
-        self.channels = result.value
+        self.channels = num_channels(self._task_analog)
         log.debug('Configured retriggerable AI with %d channels', self.channels)
-
-    def create_retriggerable_ai(self, ai, trigger, counter=None, run=None,
-                                callback=None, task_analog=None,
-                                task_record=None):
-        '''
-        Create retriggerable data acquisition
-
-        Parameters
-        ----------
-        ai : str
-            Line to acquire data from
-        trigger : str
-            Line to monitor for trigger
-        counter : str
-            Counter to use for controlling data acquisition.  Note that this
-            type of data acquisition requires the use of paired counters.  Ctr0
-            will be paired with Ctr1, Ctr2 will be paired with Ctr3, etc.  If
-            your device only has two counters, then you cannot use an event
-            timer as well.  The counters are hardwired together (i.e. if you
-            specify '/Dev1/Ctr0' or '/Dev1/Ctr1', the other counter in the pair
-            will automatically be reserved).
-        task_analog : {None, niDAQmx task}
-            Task to use for reading analog data in.  If None, a new task will be
-            created.
-        task_record : {None, niDAQmx task}
-            Task to use for controlling record counter.  If None, a new task
-            will be created.
-
-        Returns
-        -------
-        task_analog
-            Configured and committed task for analog data
-        task_record
-            Configured and committed task for triggering acquisition of analog
-            data.
-        '''
-        if task_analog is None:
-            task_analog = self._create_task()
-        if task_record is None:
-            task_record = self._create_task()
-
-        # Set up the analog input to continously acquire samples.  However,
-        # since it's tied to the internal output of the counter, it will only
-        # acquire when the counter is active.  Since the counter only runs for a
-        # finite number of samples after each trigger, this is effectively a
-        # triggered
-        ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, -1.0,
-                                    1.0, ni.DAQmx_Val_Volts, '')
-        ni.DAQmxCfgSampClkTiming(task_analog, counter+'InternalOutput', self.fs,
-                                 ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
-                                 self.epoch_size)
-        ni.DAQmxSetBufInputBufSize(task_analog, self.epoch_size*1000)
-
-        ni.DAQmxCreateCOPulseChanFreq(task_record, counter, '', ni.DAQmx_Val_Hz,
-                                      ni.DAQmx_Val_Low, 0, self.fs, 0.5)
-        ni.DAQmxCfgImplicitTiming(task_record, ni.DAQmx_Val_FiniteSamps,
-                                  self.epoch_size)
-        ni.DAQmxCfgDigEdgeStartTrig(task_record, trigger, ni.DAQmx_Val_Rising)
-
-        # Ensure trigger rearms after each detection event
-        ni.DAQmxSetStartTrigRetriggerable(task_record, True)
-        duration = self.trigger_duration*0.5
-        ni.DAQmxSetDigEdgeStartTrigDigFltrMinPulseWidth(task_record, duration)
-
-        ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
-        ni.DAQmxTaskControl(task_record, ni.DAQmx_Val_Task_Commit)
-
-        if callback is not None:
-            self.create_everynsamples_callback(task_analog, callback,
-                                               self.epoch_size)
-        return task_analog, task_record
 
     def read_timer(self):
         result = ctypes.c_uint32()
@@ -412,8 +496,16 @@ class TriggeredDAQmxSource(DAQmxSource):
         return result.value
 
     def samples_available(self):
-        samples = super(TriggeredDAQmxSource, self).samples_available()
-        return int(np.floor(samples/self.epoch_size)*self.epoch_size)
+        return samples_available(self._task_analog, self.epoch_size)
+
+    def read_analog(self, timeout=None):
+        '''
+        Returns 3D array, epoch, channel, time
+        '''
+        analog_data = super(TriggeredDAQmxSource, self).read_analog(timeout)
+        epochs = int(analog_data.shape[-1]/self.epoch_size)
+        analog_data.shape = self.channels, epochs, self.epoch_size
+        return analog_data.swapaxes(0, 1)
 
 
 class DAQmxChannel(Channel):
@@ -440,8 +532,9 @@ class DAQmxChannel(Channel):
 class DAQmxPlayer(DAQmxBase, ThreadPlayerMixin, QueuedPlayerMixin, Player):
 
     def __init__(self, fs=200e3, output_line='/Dev1/ao0',
-                 trigger_line='/Dev1/port0/line0',
-                 run_line='/Dev1/port0/line1', attenuator=None, **kwargs):
+                 expected_range=DAQmxDefaults.AO_RANGE,
+                 trigger_line=DAQmxDefaults.AO_TRIGGER,
+                 run_line=DAQmxDefaults.AO_RUN, attenuator=None, **kwargs):
         variables = locals()
         kwargs = variables.pop('kwargs')
         for k, v in variables.items():
@@ -452,7 +545,8 @@ class DAQmxPlayer(DAQmxBase, ThreadPlayerMixin, QueuedPlayerMixin, Player):
 
     def setup(self):
         self._task_analog, self._task_digital = \
-            self._create_ao(self.output_line, self.trigger_line, self.run_line)
+            create_continuous_ao(self.output_line, self.trigger_line,
+                                 self.run_line, self.fs, self.expected_range)
         self._tasks.extend((self._task_digital, self._task_analog))
         self.samples_written = 0
 
@@ -471,40 +565,6 @@ class DAQmxPlayer(DAQmxBase, ThreadPlayerMixin, QueuedPlayerMixin, Player):
                   '%d samples to add to buffer',
                   self.samples_written, result.value, write_size)
         return write_size
-
-    def _create_ao(self, output_line, trigger_line, run_line):
-        # Set up analog task
-        task_analog = self._create_task('analog output')
-        task_digital = self._create_task('digital output')
-
-        # Setup analog output
-        ni.DAQmxCreateAOVoltageChan(task_analog, output_line, '',
-                                    -5, 5, ni.DAQmx_Val_Volts, '')
-        ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
-        ni.DAQmxCfgSampClkTiming(task_analog, '', self.fs, ni.DAQmx_Val_Rising,
-                                 ni.DAQmx_Val_ContSamps, int(self.fs))
-
-        # Set up trigger line
-        ni.DAQmxCreateDOChan(task_digital, ','.join([trigger_line, run_line]),
-                             '', ni.DAQmx_Val_ChanPerLine)
-        ni.DAQmxSetWriteRegenMode(task_digital, ni.DAQmx_Val_DoNotAllowRegen)
-        ni.DAQmxCfgSampClkTiming(task_digital, 'ao/SampleClock', self.fs,
-                                 ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
-                                 int(self.fs))
-
-        # Commit the tasks so we can catch resource errors early
-        ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
-        ni.DAQmxTaskControl(task_digital, ni.DAQmx_Val_Task_Commit)
-        result = ctypes.c_uint32()
-        ni.DAQmxGetBufOutputBufSize(task_analog, result)
-        log.debug('AO buffer size %d', result.value)
-        ni.DAQmxGetBufOutputOnbrdBufSize(task_analog, result)
-        log.debug('AO onboard buffer size %d', result.value)
-        ni.DAQmxGetBufOutputBufSize(task_digital, result)
-        log.debug('DO buffer size %d', result.value)
-        ni.DAQmxGetBufOutputOnbrdBufSize(task_digital, result)
-        log.debug('DO onboard buffer size %d', result.value)
-        return task_analog, task_digital
 
     def write(self, attenuation, analog, trigger, running):
         analog_result = ctypes.c_long()
@@ -553,7 +613,7 @@ class DAQmxAttenControl(DAQmxBase):
     # DAC (the NI DAC can provide sufficient output to cover the full range of
     # the BUF634 when the volume control is set to 0 dB).
     VOLUME_STEP = 0.5
-    VOLUME_MAX = 0
+    VOLUME_MAX = 31.5
     VOLUME_MIN = -96
     VOLUME_BITS = 16
 
@@ -586,12 +646,13 @@ class DAQmxAttenControl(DAQmxBase):
     fs = 200e3
 
     def __init__(self,
-                 clock_line='/Dev1/port0/line4',
-                 cs_line='/Dev1/port0/line1',
-                 data_line='/Dev1/port0/line6',
-                 mute_line='/Dev1/port1/line6',
-                 zc_line='/Dev1/port1/line5',
-                 hw_clock='/Dev1/FreqOut'):
+                 clock_line=DAQmxDefaults.VOLUME_CLK,
+                 cs_line=DAQmxDefaults.VOLUME_CS,
+                 data_line=DAQmxDefaults.VOLUME_SDI,
+                 mute_line=DAQmxDefaults.VOLUME_MUTE,
+                 zc_line=DAQmxDefaults.VOLUME_ZC,
+                 hw_clock=DAQmxDefaults.DIO_CLOCK,
+                 ):
         '''
         Parameters
         ----------
@@ -632,7 +693,7 @@ class DAQmxAttenControl(DAQmxBase):
         # serial data line high or low one cycle before setting the serial
         # clock high.  Here, the serial clock basically runs at half the rate
         # of the sample clock.
-        task = self._create_task('COM timer')
+        task = create_task('COM timer')
         ni.DAQmxCreateCOPulseChanFreq(task, timer, '', ni.DAQmx_Val_Hz,
                                       ni.DAQmx_Val_Low, 0,
                                       self.VOLUME_CLOCK_FREQ, 0.5)
@@ -640,7 +701,7 @@ class DAQmxAttenControl(DAQmxBase):
         return task
 
     def _setup_serial_comm(self, volume_lines, timer=None):
-        task = self._create_task('Serial COM')
+        task = create_task('Serial COM')
         # Configure the task to send serial data to the PGA2311 (stereo audio
         # volume control).  This output should be fed into pin 6 (SCLK), P0.0
         # is chip select (CS) input.  The IC will only accept data when CS is
@@ -686,8 +747,8 @@ class DAQmxAttenControl(DAQmxBase):
     def setup(self):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
-        self._task_mute = self._create_task('Mute control')
-        self._task_zc = self._create_task('ZC control')
+        self._task_mute = create_task('Mute control')
+        self._task_zc = create_task('ZC control')
 
         self._task_com, self._task_clk = \
             self._setup_serial_comm(self.serial_line, self.hw_clock)
@@ -905,16 +966,72 @@ class DAQmxAttenControl(DAQmxBase):
         return np.clip(hw_atten, self.MIN_ATTEN, self.MAX_ATTEN)
 
 
-def get_bits(word, n, order='big-endian'):
-    bitword = [(word >> i) & 1 for i in range(n)]
-    if order == 'big-endian':
-        return bitword[::-1]
-    elif order == 'little-endian':
-        return bitword
-    else:
-        raise ValueError('Byte order {} not recognized'.format(order))
+class DAQmxAcquire(object):
+
+    def __init__(self, signal, repetitions, output_line, input_line,
+                 gain, calibration, dac_fs=100e3, adc_fs=100e3, duration=1,
+                 iti=0.01, callback=None):
+
+        for k, v in locals().items():
+            setattr(self, k, v)
+
+        self.complete = False
+        self.waveforms = []
+        self.epochs_acquired = 0
+
+        # Set up the recording
+        self.iface_adc = TriggeredDAQmxSource(fs=adc_fs,
+                                              epoch_duration=duration,
+                                              input_line=input_line,
+                                              callback=self.poll)
+        self.iface_adc.setup()
+        self.iface_adc.start()
+
+        self.iface_atten = DAQmxAttenControl()
+        self.iface_atten.setup()
+        self.iface_atten.set_gain(gain)
+        self.iface_atten.clear()
+
+        channel = DAQmxChannel(token=signal, calibration=calibration,
+                               output_line=output_line, duration=duration)
+        self.iface_dac = DAQmxPlayer(fs=dac_fs, duration=duration)
+        self.iface_dac.add_channel(channel)
+        self.iface_dac.queue_init('FIFO')
+        self.iface_dac.queue_append(repetitions, iti)
+
+    def start(self):
+        self.iface_dac.play_queue()
+
+    def stop(self):
+        self.iface_adc.clear()
+        self.iface_dac.clear()
+
+    def join(self):
+        while not self.complete:
+            time.sleep(0.1)
+
+    def poll(self):
+        waveforms = self.iface_adc.read_analog()
+        self.epochs_acquired += len(waveforms)
+        self.waveforms.append(waveforms)
+        if self.epochs_acquired >= self.repetitions:
+            self.stop()
+            self.waveforms = np.concatenate(self.waveforms, axis=0)
+            self.complete = True
+        if self.callback is not None:
+            self.callback(self.epochs_acquired, self.complete)
 
 
+def acquire(*args, **kwargs):
+    daq = DAQmxAcquire(*args, **kwargs)
+    daq.start()
+    daq.join()
+    return daq.waveforms
+
+
+################################################################################
+# Tests
+################################################################################
 class TestDAQmxAttenControl(unittest.TestCase):
 
     def test_bitword(self):

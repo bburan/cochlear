@@ -1,27 +1,20 @@
 from __future__ import division
 
-import tempfile
-import os.path
 import shutil
 
 import numpy as np
-import tables
 
-from traits.api import (HasTraits, Float, Instance, Int, Property, Any, Bool,
-                        Enum)
-from traitsui.api import View, Item, VGroup, ToolBar, Action, HSplit, Include
-from pyface.api import ImageResource
+from traits.api import (Float, Int, Property, Any, Bool, Enum)
+from traitsui.api import View, Item, VGroup, Include
 from enable.api import Component, ComponentEditor
 from chaco.api import (DataRange1D, VPlotContainer, PlotAxis, create_line_plot,
                        LogMapper, OverlayPlotContainer)
 
-from experiment import (icon_dir, AbstractController, AbstractData,
-                        AbstractParadigm)
-from experiment.channel import FileFilteredEpochChannel
+from experiment import (icon_dir, AbstractController, AbstractParadigm)
 from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
-from neurogen.calibration import SimpleCalibration
+from neurogen.calibration import LinearCalibration
 from neurogen.util import patodb, db
 
 from nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxPlayer,
@@ -33,35 +26,30 @@ ADC_FS = 200e3
 
 def get_chirp_transform(vrms):
     calibration_data = np.array([
-        (0, 10),
-        (800, 60),
-        (4e3, 60),
-        (20e3, 20),
-        (100e3, 0)
+        #(100, 70),
+        #(100e3, -10),
+        (100, 0),
+        (100e3, 0),
     ])
     frequencies = calibration_data[:, 0]
     magnitude = calibration_data[:, 1]
-    phase = np.zeros_like(magnitude)
-    return SimpleCalibration.from_single_vrms(frequencies=frequencies,
-                                              magnitude=magnitude,
-                                              phase=phase,
-                                              vrms=vrms)
+    return LinearCalibration.from_single_vrms(frequencies, magnitude, vrms)
 
 
 class BaseChirpCalSettings(AbstractParadigm):
 
     kw = dict(context=True)
-    exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
+    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', **kw)
 
     output = Enum(('ao0', 'ao1'), label='Analog output (channel)', **kw)
-    rise_time = Float(1e-3, label='Envelope rise time', **kw)
-    amplitude = Float(2, label='Waveform amplitude (Vrms)', **kw)
-    output_gain = Float(0, label='Output gain (dB)', **kw)
-    freq_lb = Float(0.4e3, label='Start frequency (Hz)', **kw)
-    freq_ub = Float(40e3, label='End frequency (Hz)', **kw)
-    freq_resolution = Float(25, label='Frequency resolution (Hz)')
-    fft_averages = Int(16, label='Number of FFTs', **kw)
-    waveform_averages = Int(16, label='Number of chirps per FFT', **kw)
+    rise_time = Float(5e-3, label='Envelope rise time', **kw)
+    amplitude = Float(10, label='Waveform amplitude (Vrms)', **kw)
+    output_gain = Float(31.5, label='Output gain (dB)', **kw)
+    freq_lb = Float(0.1e3, label='Start frequency (Hz)', **kw)
+    freq_ub = Float(60e3, label='End frequency (Hz)', **kw)
+    freq_resolution = Float(50, label='Frequency resolution (Hz)')
+    fft_averages = Int(4, label='Number of FFTs', **kw)
+    waveform_averages = Int(8, label='Number of chirps per FFT', **kw)
     ici = Float(0.001, label='Inter-chirp interval', **kw)
 
     averages = Property(depends_on='fft_averages, waveform_averages',
@@ -138,38 +126,28 @@ class BaseChirpCalController(DAQmxDefaults, AbstractController):
         self.iface_adc = TriggeredDAQmxSource(fs=self.adc_fs,
                                               epoch_duration=epoch_duration,
                                               input_line=self.MIC_INPUT,
-                                              counter_line=self.AI_COUNTER,
-                                              trigger_line=self.AI_TRIGGER,
                                               callback=self.poll,
                                               trigger_duration=10e-3)
         self.model.data._create_microphone_nodes(self.adc_fs, epoch_duration)
         self.iface_adc.setup()
         self.iface_adc.start()
 
-    def _setup_output(self):
+    def _setup_output(self, output=None):
+        if output is None:
+            output = self.get_current_value('output')
         freq_lb = self.get_current_value('freq_lb')
         freq_ub = self.get_current_value('freq_ub')
-        output = self.get_current_value('output')
         epoch_duration = self.get_current_value('duration')
         ici = self.get_current_value('ici')
         averages = self.get_current_value('averages')
         output_gain = self.get_current_value('output_gain')
         vrms = self.get_current_value('amplitude')
         rise_time = self.get_current_value('rise_time')
-        #calibration = SimpleCalibration.as_attenuation(vrms=vrms)
         calibration = get_chirp_transform(vrms)
         analog_output = '/{}/{}'.format(self.DEV, output)
 
-        self.iface_att = DAQmxAttenControl(clock_line=self.VOLUME_CLK,
-                                           cs_line=self.VOLUME_CS,
-                                           data_line=self.VOLUME_SDI,
-                                           mute_line=self.VOLUME_MUTE,
-                                           zc_line=self.VOLUME_ZC,
-                                           hw_clock=self.DIO_CLOCK)
-        self.iface_dac = DAQmxPlayer(fs=self.dac_fs,
-                                     output_line=analog_output,
-                                     trigger_line=self.SPEAKER_TRIGGER,
-                                     run_line=self.SPEAKER_RUN,
+        self.iface_att = DAQmxAttenControl()
+        self.iface_dac = DAQmxPlayer(fs=self.dac_fs, output_line=analog_output,
                                      duration=epoch_duration)
 
         # By using an Attenuation calibration and setting tone level to 0, a

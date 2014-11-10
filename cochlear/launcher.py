@@ -1,5 +1,6 @@
 import os.path
 
+import numpy as np
 import tables
 
 from traits.api import (HasTraits, Property, List, Str, Instance)
@@ -8,7 +9,7 @@ from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
 from pyface.api import ImageResource
 
 from experiment import icon_dir
-from neurogen.calibration import SimpleCalibration
+from neurogen.calibration import LinearCalibration
 
 from cochlear import settings
 from cochlear import calibration_chirp as cal_mic
@@ -24,14 +25,16 @@ class ExperimentController(Controller):
         info.object._update_calibrations()
 
     def run_inear_cal_0(self, info):
-        calibration = cal_inear.launch_gui('ao0', info.object.mic_calibration,
+        calibration = cal_inear.launch_gui('ao0',
+                                           info.object.exp_mic_sens,
                                            parent=info.ui.control,
                                            kind='livemodal')
         if calibration is not None:
             info.object.inear_cal_0 = calibration
 
     def run_inear_cal_1(self, info):
-        calibration = cal_inear.launch_gui('ao1', info.object.mic_calibration,
+        calibration = cal_inear.launch_gui('ao1',
+                                           info.object.exp_mic_sens,
                                            parent=info.ui.control,
                                            kind='livemodal')
         if calibration is not None:
@@ -45,7 +48,7 @@ class ExperimentController(Controller):
     def run_dpoae_experiment(self, info):
         dpoae_experiment.launch_gui(info.object.inear_cal_0,
                                     info.object.inear_cal_1,
-                                    info.object.mic_calibration,
+                                    info.object.exp_mic_sens,
                                     parent=info.ui.control, kind='livemodal')
 
 
@@ -60,9 +63,9 @@ class ExperimentSetup(HasTraits):
     calibrations = List
     calibration = Str
 
-    mic_calibration = Instance('neurogen.calibration.SimpleCalibration')
-    inear_cal_0 = Instance('neurogen.calibration.SimpleCalibration')
-    inear_cal_1 = Instance('neurogen.calibration.SimpleCalibration')
+    mic_cal = Instance('neurogen.calibration.LinearCalibration')
+    inear_cal_0 = Instance('neurogen.calibration.LinearCalibration')
+    inear_cal_1 = Instance('neurogen.calibration.LinearCalibration')
 
     def _calibrations_default(self):
         return self._update_calibrations()
@@ -84,11 +87,8 @@ class ExperimentSetup(HasTraits):
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
-        with tables.open_file(filename, 'r') as fh:
-            frequency = fh.root.frequency.read()
-            exp_mic_sens = fh.root.exp_mic_sens.read()
-            cal = SimpleCalibration.from_mic_sens(frequency, exp_mic_sens)
-            self.mic_calibration = cal
+        self.mic_cal = LinearCalibration.from_mic_file(filename,
+                                                       check_mode='exact')
 
     view = View(
         VGroup(

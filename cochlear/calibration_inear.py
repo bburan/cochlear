@@ -4,19 +4,19 @@ import os.path
 
 import numpy as np
 import tables
+from scipy import signal
 
 from traits.api import (HasTraits, Instance, Any, Bool)
 from traitsui.api import View, Item, VGroup, ToolBar, Action, HSplit
 from pyface.api import ImageResource
 from enable.api import Component, ComponentEditor
 from chaco.api import (DataRange1D, VPlotContainer, PlotAxis, create_line_plot,
-                       LogMapper)
-from chaco.tools.api import BetterSelectingZoom
+                       LogMapper, OverlayPlotContainer)
 
 from experiment.channel import FileFilteredEpochChannel
 from experiment import AbstractData, icon_dir
 
-from neurogen.calibration import SimpleCalibration
+from neurogen.calibration import LinearCalibration
 from neurogen.util import db
 
 from base_calibration_chirp import BaseChirpCalSettings, BaseChirpCalController
@@ -25,8 +25,7 @@ import settings
 
 class InearChirpCalSettings(BaseChirpCalSettings):
 
-    amplitude = 1
-    fft_averages = 8
+    fft_averages = 4
     waveform_averages = 8
     frequency_resolution = 50
 
@@ -34,9 +33,6 @@ class InearChirpCalSettings(BaseChirpCalSettings):
 class InearChirpCalData(AbstractData):
 
     exp_microphone = Instance('experiment.channel.EpochChannel')
-    frequency = Any()
-    speaker_spl = Any()
-    speaker_spl_vrms = Any()
 
     def _create_microphone_nodes(self, fs, epoch_duration):
         if 'exp_microphone' in self.fh.root:
@@ -51,27 +47,30 @@ class InearChirpCalData(AbstractData):
                                         **filter_kw)
         self.exp_microphone = node
 
-    def compute_transfer_functions(self, mic_cal, output_cal, exp_mic_gain,
-                                   waveform_averages):
+    def compute_transfer_functions(self, exp_mic_sens, waveform_fs, waveform,
+                                   exp_mic_gain, waveform_averages):
 
         # All functions are computed using these frequencies
-        frequency = self.exp_microphone.get_fftfreq()
-        output_vrms = output_cal.get_sf(frequency, level=0, attenuation=0)
+        self.frequency = self.exp_microphone.get_fftfreq()
 
         # Compute the PSD of microphone in Vrms and compensate for measurement
         # gain setting
-        exp_psd = self.exp_microphone \
-            .get_average_psd(waveform_averages=waveform_averages)
-        exp_psd_vrms = exp_psd/np.sqrt(2)/(10**(exp_mic_gain/20.0))
-        speaker_spl = mic_cal.get_spl(frequency, exp_psd_vrms)
-        speaker_spl_vrms = mic_cal.get_spl(frequency, exp_psd_vrms/output_vrms)
-        self._create_array('frequency', frequency)
-        self._create_array('exp_psd_vrms', exp_psd_vrms)
-        self._create_array('speaker_spl', speaker_spl)
-        self._create_array('speaker_spl_vrms', speaker_spl)
-        self.frequency = frequency
-        self.speaker_spl = speaker_spl
-        self.speaker_spl_vrms = speaker_spl_vrms
+        exp_psd_rms = self.exp_microphone \
+            .get_average_psd(waveform_averages=waveform_averages, rms=True)
+        self.exp_psd_rms = db(exp_psd_rms)-exp_mic_gain
+
+        psd = 2*np.abs(np.fft.rfft(waveform))/len(waveform)
+        self.dac_psd_rms = db(psd/np.sqrt(2))
+        self.dac_frequency = np.fft.rfftfreq(len(waveform), 1/waveform_fs)
+
+        self.speaker_sens = self.dac_psd_rms+exp_mic_sens-self.exp_psd_rms
+        self.speaker_spl = db(1)-self.speaker_sens-db(20e-6)
+
+        self._create_array('frequency', self.frequency)
+        self._create_array('exp_psd_rms', self.exp_psd_rms)
+        self._create_array('dac_frequency', self.dac_frequency)
+        self._create_array('dac_psd_rms', self.dac_psd_rms)
+        self._create_array('speaker_sens', self.speaker_sens)
 
     def _create_array(self, name, array, store_node=None):
         if store_node is None:
@@ -83,7 +82,6 @@ class InearChirpCalData(AbstractData):
 
 class InearChirpCalController(BaseChirpCalController):
 
-    mic_cal = Any(None)
     calibration_accepted = Bool(False)
 
     def poll(self):
@@ -91,16 +89,21 @@ class InearChirpCalController(BaseChirpCalController):
         self.model.data.exp_microphone.send(waveform)
         self.epochs_acquired += 1
         if self.epochs_acquired == self.get_current_value('averages'):
-            exp_mic_gain = self.get_current_value('exp_mic_gain')
-            waveform_averages = self.get_current_value('waveform_averages')
-            self.model.data.compute_transfer_functions(self.mic_cal,
-                                                       self.current_channel.calibration,
-                                                       exp_mic_gain,
-                                                       waveform_averages)
-            self.model.data.save(**dict(self.model.paradigm.items()))
-            self.model.generate_plots()
-            self.complete = True
-            self.stop()
+            self.finalize()
+
+    def finalize(self):
+        exp_mic_gain = self.get_current_value('exp_mic_gain')
+        waveform_averages = self.get_current_value('waveform_averages')
+        waveform_fs, waveform = \
+            self.iface_dac.fs, self.iface_dac.realize().ravel()
+        self.model.data.compute_transfer_functions(self.model.exp_mic_sens,
+                                                   waveform_fs, waveform,
+                                                   exp_mic_gain,
+                                                   waveform_averages)
+        self.model.data.save(**dict(self.model.paradigm.items()))
+        self.model.generate_plots()
+        self.complete = True
+        self.stop()
 
     def update_inear(self, info):
         self.calibration_accepted = True
@@ -116,6 +119,7 @@ class InearChirpCal(HasTraits):
     paradigm = Instance(InearChirpCalSettings, ())
     data = Instance(InearChirpCalData)
     container = Instance(Component)
+    exp_mic_sens = Any(None)
 
     def generate_plots(self):
         container = VPlotContainer(padding=70, spacing=70)
@@ -125,55 +129,59 @@ class InearChirpCal(HasTraits):
         signal = self.data.exp_microphone.get_average()*1e3
         plot = create_line_plot((time, signal), color='black')
         axis = PlotAxis(component=plot, orientation='left',
-                        title="Exp. mic. signal (mV)")
+                        title="Exp. mic. (mV)")
         plot.underlays.append(axis)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Time (msec)")
         plot.underlays.append(axis)
-        tool = BetterSelectingZoom(component=plot)
-        plot.tools.append(tool)
         container.insert(0, plot)
 
-        averages = self.paradigm.waveform_averages
         index_range = DataRange1D(low_setting=self.paradigm.freq_lb*0.9,
                                   high_setting=self.paradigm.freq_ub*1.1)
         index_mapper = LogMapper(range=index_range)
 
         # Overlay the experiment and reference microphone response (FFT)
-        frequency = self.data.exp_microphone.get_fftfreq()
-        exp_psd_vrms = self.data.exp_microphone \
-            .get_average_psd(waveform_averages=averages)/np.sqrt(2)
-        exp_plot = create_line_plot((frequency[1:], db(exp_psd_vrms[1:], 1e-3)),
-                                    color='black')
+        frequency = self.data.frequency[1:]
+        exp_mic_sens = self.exp_mic_sens[1:]
+        exp_psd_rms = self.data.exp_psd_rms[1:]
+        dac_psd_rms = self.data.dac_psd_rms[1:]
+        speaker_spl = self.data.speaker_spl[1:]
+
+        overlay = OverlayPlotContainer()
+        exp_plot = create_line_plot((frequency, exp_psd_rms), color='black')
         exp_plot.index_mapper = index_mapper
         axis = PlotAxis(component=exp_plot, orientation='bottom',
                         title='Frequency (Hz)')
         exp_plot.underlays.append(axis)
         axis = PlotAxis(component=exp_plot, orientation='left',
-                        title='Exp. mic. resp (dB re 1mV)')
+                        title='Exp. mic. (dB re V)')
         exp_plot.underlays.append(axis)
-        container.insert(0, exp_plot)
+        overlay.add(exp_plot)
 
-        plot = create_line_plot((frequency[1:],
-                                 self.data.speaker_spl[1:]),
-                                value_bounds=(40, self.data.speaker_spl.max()),
-                                color='black')
-        plot.index_mapper = index_mapper
+        sens_plot = create_line_plot((frequency, exp_mic_sens), color='black')
+        sens_plot.alpha = 0.5
+        sens_plot.index_mapper = index_mapper
+        axis = PlotAxis(component=exp_plot, orientation='right',
+                        title='Exp. mic. sens (dB re V)')
+        exp_plot.underlays.append(axis)
+        overlay.add(sens_plot)
+
+        container.insert(0, overlay)
+
+        plot = create_line_plot((frequency, dac_psd_rms), color='black')
+        #plot.index_mapper = index_mapper
         axis = PlotAxis(component=plot, orientation='left',
-                        title="Actual speaker output (dB SPL)")
+                        title="DAC (dB re V)")
         plot.underlays.append(axis)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Frequency (Hz)")
         plot.underlays.append(axis)
         container.insert(0, plot)
 
-        plot = create_line_plot((frequency[1:],
-                                 self.data.speaker_spl_vrms[1:]),
-                                value_bounds=(40, self.data.speaker_spl_vrms.max()),
-                                color='black')
+        plot = create_line_plot((frequency, speaker_spl), color='black')
         plot.index_mapper = index_mapper
         axis = PlotAxis(component=plot, orientation='left',
-                        title="Speaker output at 1Vrms (dB SPL)")
+                        title="Speaker @ 1Vrms. (dB SPL)")
         plot.underlays.append(axis)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Frequency (Hz)")
@@ -216,19 +224,16 @@ class InearChirpCal(HasTraits):
     )
 
 
-def launch_gui(output, mic_cal, **kwargs):
+def launch_gui(output, exp_mic_sens, **kwargs):
     tempfile = os.path.join(settings.TEMP_DIR, 'temp_inear.cal')
     with tables.open_file(tempfile, 'w') as fh:
         data = InearChirpCalData(store_node=fh.root)
-        controller = InearChirpCalController(mic_cal=mic_cal)
+        controller = InearChirpCalController()
         paradigm = InearChirpCalSettings(output=output)
-        experiment = InearChirpCal(data=data, paradigm=paradigm)
+        experiment = InearChirpCal(data=data, paradigm=paradigm,
+                                   exp_mic_sens=exp_mic_sens)
         experiment.edit_traits(handler=controller, **kwargs)
         if not controller.calibration_accepted:
             return None
-        frequency = experiment.data.frequency
-        magnitude = experiment.data.speaker_spl_vrms
-        phase = np.zeros_like(magnitude)
-        gain = experiment.paradigm.output_gain
-        return SimpleCalibration.from_single_vrms(frequency, magnitude, phase,
-                                                  gain=gain)
+        return SimpleCalibration(experiment.data.frequency,
+                                 experiment.data.speaker_sens)

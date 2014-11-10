@@ -6,7 +6,7 @@ import shutil
 import numpy as np
 import tables
 
-from traits.api import (HasTraits, Float, Instance, Any)
+from traits.api import (HasTraits, Float, Instance, Any, Property)
 from traitsui.api import View, Item, VGroup, ToolBar, Action, HSplit
 from pyface.api import ImageResource
 from enable.api import Component, ComponentEditor
@@ -17,8 +17,9 @@ from experiment import (icon_dir, AbstractData)
 from experiment.channel import FileFilteredEpochChannel
 from experiment.util import get_save_file
 
-from neurogen.util import patodb, db
+from neurogen.util import db, dbi
 
+import calibration_standard as standard
 from base_calibration_chirp import BaseChirpCalSettings, BaseChirpCalController
 import settings
 
@@ -26,8 +27,12 @@ import settings
 class ReferenceChirpCalSettings(BaseChirpCalSettings):
 
     kw = dict(context=True)
-    ref_mic_sens = Float(2.0e-3, label='Ref. mic. sens. (V/Pa)', **kw)
+    ref_mic_sens_mv = Float(2.66, label='Ref. mic. sens. (mV/Pa)', **kw)
     ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', **kw)
+    ref_mic_sens = Property(depends_on='ref_mic_sens_mv', **kw)
+
+    def _get_ref_mic_sens(self):
+        return self.ref_mic_sens_mv*1e3
 
     output_settings = VGroup(
         'output',
@@ -38,7 +43,7 @@ class ReferenceChirpCalSettings(BaseChirpCalSettings):
     )
 
     mic_settings = VGroup(
-        'ref_mic_sens',
+        'ref_mic_sens_mv',
         'ref_mic_gain',
         'exp_mic_gain',
         label='Microphone settings',
@@ -90,35 +95,37 @@ class ReferenceChirpCalData(AbstractData):
             store_node._f_get_child(name).remove()
         return self.fh.create_array(store_node, name, array)
 
-    def compute_transfer_functions(self, ref_mic_sens, ref_mic_gain,
-                                   exp_mic_gain, waveform_averages):
+    def compute_transfer_functions(self, waveform_fs, waveform, ref_mic_sens,
+                                   ref_mic_gain, exp_mic_gain,
+                                   waveform_averages):
+
+        self.time = np.arange(len(waveform))/waveform_fs
+        self.waveform = waveform
 
         # All functions are computed using these frequencies
-        frequency = self.ref_microphone.get_fftfreq()
+        self.frequency = self.ref_microphone.get_fftfreq()
 
         # Compute the PSD of each microphone in Vrms
         ref_psd = self.ref_microphone \
-            .get_average_psd(waveform_averages=waveform_averages)/np.sqrt(2)
+            .get_average_psd(waveform_averages=waveform_averages, rms=True)
         exp_psd = self.exp_microphone \
-            .get_average_psd(waveform_averages=waveform_averages)/np.sqrt(2)
+            .get_average_psd(waveform_averages=waveform_averages, rms=True)
 
-        # Compensate for measurement gain settings
-        ref_psd = ref_psd/(10**(ref_mic_gain/20.0))
-        exp_psd = exp_psd/(10**(exp_mic_gain/20.0))
-
-        # Actual output of speaker in pascals
-        speaker_pa = ref_psd/ref_mic_sens
-        speaker_spl = patodb(speaker_pa)
+        # Convert to dB re 1V and compensate for measurement gain settings
+        self.ref_mic_psd = db(ref_psd)-ref_mic_gain
+        self.exp_mic_psd = db(exp_psd)-exp_mic_gain
 
         # Sensitivity of experiment microphone as function of frequency
-        # (Vrms/Pa)
-        self.exp_mic_sens = exp_psd/speaker_pa
+        # expressed as Vrms (dB re Pa).  This is equivalent to
+        # (Vprobe/Vcal)/Ccal
+        self.exp_mic_sens = self.exp_mic_psd-self.ref_mic_psd+db(ref_mic_sens)
 
-        self._create_array('frequency', frequency)
-        self._create_array('ref_psd_vrms', ref_psd)
-        self._create_array('exp_psd_vrms', exp_psd)
-        self._create_array('speaker_spl', speaker_spl)
+        self._create_array('frequency', self.frequency)
+        self._create_array('ref_psd_rms', self.ref_mic_psd)
+        self._create_array('exp_psd_rms', self.exp_mic_psd)
         self._create_array('exp_mic_sens', self.exp_mic_sens)
+        self._create_array('time', self.time)
+        self._create_array('waveform', self.waveform)
 
 
 class ReferenceChirpCalController(BaseChirpCalController):
@@ -137,22 +144,31 @@ class ReferenceChirpCalController(BaseChirpCalController):
 
     def poll(self):
         waveform = self.iface_adc.read_analog(timeout=0)
-        self.model.data.exp_microphone.send(waveform[0])
-        self.model.data.ref_microphone.send(waveform[1])
+        self.model.data.exp_microphone.send(waveform[:, 0, :])
+        self.model.data.ref_microphone.send(waveform[:, 1, :])
         self.epochs_acquired += 1
         if self.epochs_acquired == self.get_current_value('averages'):
-            ref_mic_sens = self.get_current_value('ref_mic_sens')
-            ref_mic_gain = self.get_current_value('ref_mic_gain')
-            exp_mic_gain = self.get_current_value('exp_mic_gain')
-            waveform_averages = self.get_current_value('waveform_averages')
-            self.model.data.compute_transfer_functions(ref_mic_sens,
-                                                       ref_mic_gain,
-                                                       exp_mic_gain,
-                                                       waveform_averages)
-            self.model.data.save(**dict(self.model.paradigm.items()))
-            self.model.generate_plots()
-            self.complete = True
-            self.stop()
+            self.finalize()
+
+    def finalize(self):
+        waveform_fs, waveform = \
+            self.iface_dac.fs, self.iface_dac.realize().ravel()
+
+        ref_mic_sens = self.get_current_value('ref_mic_sens')
+        ref_mic_gain = self.get_current_value('ref_mic_gain')
+        exp_mic_gain = self.get_current_value('exp_mic_gain')
+        waveform_averages = self.get_current_value('waveform_averages')
+        self.model.data.compute_transfer_functions(waveform_fs, waveform,
+                                                   ref_mic_sens, ref_mic_gain,
+                                                   exp_mic_gain,
+                                                   waveform_averages)
+        self.model.data.save(**dict(self.model.paradigm.items()))
+        self.model.generate_plots()
+        self.complete = True
+        self.stop()
+
+    def run_standard_calibration(self, info):
+        standard.launch_gui(parent=info.ui.control, kind='livemodal')
 
 
 class ReferenceChirpCal(HasTraits):
@@ -164,11 +180,23 @@ class ReferenceChirpCal(HasTraits):
     def generate_plots(self):
         container = VPlotContainer(padding=70, spacing=70)
 
+
+        plot = create_line_plot((self.data.time, self.data.waveform),
+                                color='black')
+        axis = PlotAxis(component=plot, orientation='left',
+                        title="Cal. sig. (V)")
+        plot.underlays.append(axis)
+        axis = PlotAxis(component=plot, orientation='bottom',
+                        title="Time (msec)")
+        plot.underlays.append(axis)
+        container.insert(0, plot)
+
         # Overlay the experiment and reference microphone signal
         overlay = OverlayPlotContainer()
         time = self.data.ref_microphone.time
         signal = self.data.ref_microphone.get_average()*1e3
         plot = create_line_plot((time, signal), color='black')
+        plot.alpha = 0.5
         axis = PlotAxis(component=plot, orientation='left',
                         title="Ref. mic. signal (mV)")
         plot.underlays.append(axis)
@@ -185,53 +213,38 @@ class ReferenceChirpCal(HasTraits):
         overlay.insert(0, plot)
         container.insert(0, overlay)
 
-        averages = self.paradigm.waveform_averages
-
+        frequency = self.data.frequency[1:]
         index_range = DataRange1D(low_setting=self.paradigm.freq_lb*0.9,
                                   high_setting=self.paradigm.freq_ub*1.1)
         index_mapper = LogMapper(range=index_range)
 
         # Overlay the experiment and reference microphone response (FFT)
-        frequency = self.data.ref_microphone.get_fftfreq()
-        ref_psd_vrms = self.data.ref_microphone \
-            .get_average_psd(waveform_averages=averages)/np.sqrt(2)
-        exp_psd_vrms = self.data.exp_microphone \
-            .get_average_psd(waveform_averages=averages)/np.sqrt(2)
-        ref_plot = create_line_plot((frequency[1:], db(ref_psd_vrms[1:], 1e-3)),
-                                    color='black')
-        exp_plot = create_line_plot((frequency[1:], db(exp_psd_vrms[1:], 1e-3)),
-                                    color='red')
+        exp_mic_db = self.data.exp_mic_psd[1:]
+        ref_mic_db = self.data.ref_mic_psd[1:]
+
+        ref_plot = create_line_plot((frequency, ref_mic_db), color='black')
+        ref_plot.alpha = 0.5
+        exp_plot = create_line_plot((frequency, exp_mic_db), color='red')
         ref_plot.index_mapper = index_mapper
         exp_plot.index_mapper = index_mapper
         axis = PlotAxis(component=exp_plot, orientation='bottom',
                         title='Frequency (Hz)')
         exp_plot.underlays.append(axis)
         axis = PlotAxis(component=exp_plot, orientation='right',
-                        title='Exp. mic. resp (dB re 1mV)')
+                        title='Exp. mic. (dB re V)')
         exp_plot.underlays.append(axis)
         axis = PlotAxis(component=ref_plot, orientation='left',
-                        title='Ref. mic. resp (dB re 1mV)')
+                        title='Ref. mic. (dB re V)')
         ref_plot.underlays.append(axis)
         overlay = OverlayPlotContainer(ref_plot, exp_plot)
         container.insert(0, overlay)
 
-        # Convert the reference microphone response to speaker output
-        ref_psd_pa = ref_psd_vrms/self.paradigm.ref_mic_sens
-        ref_psd_spl = patodb(ref_psd_pa)
-        plot = create_line_plot((frequency[1:], ref_psd_spl[1:]), color='black')
+        # Convert to dB re mV
+        exp_mic_sens_db = self.data.exp_mic_sens[1:]+60
+        plot = create_line_plot((frequency, exp_mic_sens_db), color='red')
         plot.index_mapper = index_mapper
         axis = PlotAxis(component=plot, orientation='left',
-                        title="Speaker output (dB SPL)")
-        plot.underlays.append(axis)
-        axis = PlotAxis(component=plot, orientation='bottom',
-                        title="Frequency (Hz)")
-        plot.underlays.append(axis)
-        container.insert(0, plot)
-
-        plot = create_line_plot((frequency, db(self.data.exp_mic_sens, 1e-3)))
-        plot.index_mapper = index_mapper
-        axis = PlotAxis(component=plot, orientation='left',
-                        title="Exp. mic. sens mV (dB re Pa)")
+                        title="PT sens V (dB re Pa)")
         plot.underlays.append(axis)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Frequency (Hz)")
@@ -254,6 +267,10 @@ class ReferenceChirpCal(HasTraits):
             show_labels=False,
         ),
         toolbar=ToolBar(
+            '-',
+            Action(name='Ref. cal.', action='start',
+                   image=ImageResource('tool', icon_dir),
+                   enabled_when='not handler.state=="running"'),
             '-',
             Action(name='Start', action='start',
                    image=ImageResource('1rightarrow', icon_dir),
