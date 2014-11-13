@@ -517,6 +517,9 @@ class DAQmxChannel(Channel):
     attenuator = ScalarInput(default=None, unit=None)
     attenuator_channel = ScalarInput(default=0, unit=None)
 
+    def set_gain(self, gain):
+        return self.set_attenuation(-gain)
+
     def set_attenuation(self, atten):
         self.attenuator.set_atten(**{self.attenuator_channel: atten})
         self.attenuation = atten
@@ -986,7 +989,10 @@ class DAQmxAcquire(object):
 
         self.iface_atten = DAQmxAttenControl()
         self.iface_atten.setup()
-        self.iface_atten.set_gains(gain)
+        if np.isscalar(gain):
+            self.iface_atten.set_gains(gain)
+        else:
+            self.iface_atten.set_gain(*gain)
         self.iface_atten.clear()
 
         if waveform_buffer is None:

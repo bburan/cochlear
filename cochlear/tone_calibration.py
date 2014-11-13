@@ -1,5 +1,8 @@
 from __future__ import division
 
+import logging
+log = logging.getLogger(__name__)
+
 import time
 
 import numpy as np
@@ -24,12 +27,17 @@ from experiment import icon_dir
 from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
-from neurogen.calibration import LinearCalibration, CalibrationError
+from neurogen.calibration import (LinearCalibration, CalibrationError,
+                                  CalibrationTHDError, CalibrationNFError)
 from neurogen.util import db, dbi
 from neurogen.calibration.util import (analyze_mic_sens, analyze_tone,
                                        tone_power_conv, psd, psd_freq, thd)
 
 import settings
+
+################################################################################
+# Utility tone calibration functions
+################################################################################
 
 thd_err_mesg = 'Total harmonic distortion for {:0.1f}Hz is {:0.3}'
 nf_err_mesg = 'Power at {:0.1f}Hz of {:0.1f}dB near noise floor of {:0.1f}dB'
@@ -40,41 +48,30 @@ def _to_sens(output_spl, output_gain, vrms):
     return -norm_spl-db(20e-6)
 
 
-def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd, input_gain,
-                  input_calibration, output_gain, vrms):
+def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
+                  input_gain):
 
     nf_rms = np.mean(tone_power_conv(nf_signal, fs, frequency, 'flattop'))
     measured_thd = np.mean(thd(signal, fs, frequency, 3, 'flattop'))
     rms = np.mean(tone_power_conv(signal, fs, frequency, 'flattop'))
+    mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.4f}'
+    log.debug(mesg.format(db(nf_rms), db(rms), measured_thd))
     _check_calibration(frequency, rms, nf_rms, min_db, measured_thd, max_thd)
-
-    # Convert to SPL if input calibration is provided
-    if input_calibration is not None:
-        output_spl = input_calibration.get_spl(frequency, rms)-input_gain
-        return _to_sens(output_spl, output_gain, vrms)
     return db(rms)-input_gain
 
 
 def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
     if db(rms, nf_rms) < min_db:
         m = nf_err_mesg.format(frequency, db(rms), db(nf_rms))
-        raise CalibrationError(m)
+        raise CalibrationNFError(m)
     if thd > max_thd:
         m = thd_err_mesg.format(frequency, thd)
-        raise CalibrationError(m)
+        raise CalibrationTHDError(m)
 
 
-def tone_calibration(frequency, output_gain=31.5, input_gain=20, vrms=1,
-                     input_calibration=None, repetitions=1, fs=200e3,
-                     max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
-    '''
-    Single output calibration at a fixed frequency
+def tone_power(frequency, gain=-40, vrms=1, input_gain=20, repetitions=1,
+               fs=200e3, max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
 
-    Returns
-    -------
-    sens : dB (V/Pa)
-        Sensitivity of output in dB (V/Pa).
-    '''
     calibration = LinearCalibration.as_attenuation(vrms=vrms)
     c = ni.DAQmxChannel(calibration=calibration)
     trim_n = int(trim*fs)
@@ -84,7 +81,7 @@ def tone_calibration(frequency, output_gain=31.5, input_gain=20, vrms=1,
         'repetitions': repetitions,
         'output_line': '/Dev1/ao0',
         'input_line': '/Dev1/ai1',
-        'gain': output_gain,
+        'gain': (-np.inf, gain),
         'adc_fs': fs,
         'dac_fs': fs,
         'duration': duration,
@@ -98,15 +95,33 @@ def tone_calibration(frequency, output_gain=31.5, input_gain=20, vrms=1,
     # Measure the actual output
     c.token = blocks.Tone(frequency=frequency, level=0)
     signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
-
     return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
-                         input_gain, input_calibration, output_gain, vrms)
+                         input_gain)
 
 
-def two_tone_calibration(f1_frequency, f2_frequency, output_gain=31.5,
-                         input_gain=20, vrms=1, input_calibration=None,
-                         repetitions=1, fs=200e3, max_thd=0.01, min_db=10,
-                         duration=0.1, trim=0.01):
+def tone_spl(frequency, input_calibration, *args, **kwargs):
+    rms = tone_power(frequency, *args, **kwargs)
+    return input_calibration.get_spl(frequency, dbi(rms))
+
+
+def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
+                     **kwargs):
+    '''
+    Single output calibration at a fixed frequency
+
+    Returns
+    -------
+    sens : dB (V/Pa)
+        Sensitivity of output in dB (V/Pa).
+    '''
+    output_spl = tone_spl(frequency, input_calibration, gain, vrms, *args,
+                          **kwargs)
+    return _to_sens(output_spl, gain, vrms)
+
+
+def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
+                   f1_vrms=1, f2_vrms=1, input_gain=20, repetitions=1, fs=200e3,
+                   max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
     '''
     Dual output calibration with each output at a different frequency
 
@@ -116,10 +131,10 @@ def two_tone_calibration(f1_frequency, f2_frequency, output_gain=31.5,
         calibration of the f1 and f2 DPOAE frequencies (which are not harmonics
         of each other).
     '''
-    calibration = LinearCalibration.as_attenuation(vrms=vrms)
-    c1 = ni.DAQmxChannel(calibration=calibration)
-    c2 = ni.DAQmxChannel(calibration=calibration)
-
+    cal1 = LinearCalibration.as_attenuation(vrms=f1_vrms)
+    cal2 = LinearCalibration.as_attenuation(vrms=f2_vrms)
+    c1 = ni.DAQmxChannel(calibration=cal1)
+    c2 = ni.DAQmxChannel(calibration=cal2)
     trim_n = int(trim*fs)
 
     daq_kw = {
@@ -127,7 +142,7 @@ def two_tone_calibration(f1_frequency, f2_frequency, output_gain=31.5,
         'repetitions': repetitions,
         'output_line': '/Dev1/ao0:1',
         'input_line': '/Dev1/ai1',
-        'gain': output_gain,
+        'gain': (f2_gain, f1_gain),
         'adc_fs': fs,
         'dac_fs': fs,
         'duration': duration,
@@ -145,11 +160,109 @@ def two_tone_calibration(f1_frequency, f2_frequency, output_gain=31.5,
     signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
 
     f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd,
-                       input_gain, input_calibration, output_gain, vrms)
+                       input_gain)
     f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd,
-                       input_gain, input_calibration, output_gain, vrms)
+                       input_gain)
     return f1, f2
 
+
+def two_tone_spl(f1_frequency, f2_frequency, input_calibration, *args,
+                 **kwargs):
+    '''
+    Dual measurement of output SPL
+
+    .. note::
+        If one frequency is a harmonic of the other, the calibration will fail
+        due to the THD measure.  This function is typically most useful for
+        calibration of the f1 and f2 DPOAE frequencies (which are not harmonics
+        of each other).
+    '''
+    f1_rms, f2_rms = two_tone_power(f1_frequency, f2_frequency, *args, **kwargs)
+    f1_spl = input_calibration.get_spl(f1_frequency, dbi(f1_rms))
+    f2_spl = input_calibration.get_spl(f1_frequency, dbi(f2_rms))
+    return f1_spl, f2_spl
+
+
+def two_tone_calibration(f1_frequency, f2_frequency, input_calibration,
+                         f1_gain=-50, f2_gain=-50, f1_vrms=1, f2_vrms=1, *args,
+                         **kwargs):
+    '''
+    Dual output calibration with each output at a different frequency
+
+    .. note::
+        If one frequency is a harmonic of the other, the calibration will fail
+        due to the THD measure.  This function is typically most useful for
+        calibration of the f1 and f2 DPOAE frequencies (which are not harmonics
+        of each other).
+    '''
+    f1_spl, f2_spl = two_tone_spl(f1_frequency, f2_frequency, input_calibration,
+                                  f1_gain, f2_gain, f1_vrms, f2_vrms, *args,
+                                  **kwargs)
+    f1_sens = _to_sens(f1_spl, f1_gain, f1_vrms)
+    f2_sens = _to_sens(f2_spl, f2_gain, f2_vrms)
+    return f1_sens, f2_sens
+
+
+def ceiling_spl(frequency, max_spl=80, initial_gain=-40, vrms=1, spl_step=5,
+                gain_step=5, **cal_kw):
+    '''
+    Return maximum SPL at given frequency without distortion of output
+    '''
+    step_size = gain_step
+    last_step = None
+    ceiling_spl = None
+    output_gain = initial_gain
+
+    # Determine the starting output gain to achieve the maximum output.  At this
+    # point we are going to ignore THD; however, we need to make sure we are
+    # measuring above the noise floor.
+    initial_cal_kw = cal_kw.copy()
+    initial_cal_kw['max_thd'] = np.inf
+    while True:
+        try:
+            spl = tone_calibration(frequency, output_gain, **initial_cal_kw)
+            output_gain += max_spl-spl
+            output_gain = np.round(output_gain/0.5)*0.5
+            break
+        except CalibrationNFError:
+            output_gain += step_size
+
+    while True:
+        try:
+            spl = tone_calibration(frequency, output_gain, **cal_kw)
+            if np.abs(spl-max_spl) < 1:
+                ceiling_spl = spl
+                break
+            else:
+                output_gain += max_spl-spl
+                output_gain = np.round(output_gain/0.5)*0.5
+                last_step = max_spl-spl
+        except CalibrationNFError:
+            # We have descended too close to the noise floor
+            if last_step is not None and last_step < 0:
+                step_size = int(step_size/2)
+            output_gain += step_size
+            last_step = step_size
+        except CalibrationTHDError:
+            max_spl -= spl_step
+            if last_step is not None and last_step > 0:
+                step_size = int(step_size/2)
+            output_gain -= step_size
+            last_step = -step_size
+        if step_size <= 1:
+            break
+
+    if ceiling_spl is None:
+        raise CalibrationError('Could not determine maximum SPL')
+
+    mesg ='Maximum output at {:.1f}Hz is {:.1f}dB SPL'
+    log.debug(mesg.format(frequency, ceiling_spl))
+    return ceiling_spl
+
+
+################################################################################
+# Calibration GUI
+################################################################################
 
 class SpeakerToneCalibrationResult(HasTraits):
 
