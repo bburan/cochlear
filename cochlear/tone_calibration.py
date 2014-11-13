@@ -5,6 +5,7 @@ import time
 import numpy as np
 import matplotlib as mp
 import tables
+import pyfftw
 
 from traits.api import (HasTraits, Float, Int, Property, Enum, Bool, Instance,
                         Str, List, Array)
@@ -23,124 +24,145 @@ from experiment import icon_dir
 from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
-from neurogen.calibration import LinearCalibration
+from neurogen.calibration import LinearCalibration, CalibrationError
 from neurogen.util import db, dbi
-from neurogen.calibration.util import tone_power_conv, tone_power_fft, psd
+from neurogen.calibration.util import (analyze_mic_sens, analyze_tone,
+                                       tone_power_conv, psd, psd_freq, thd)
 
 import settings
 
+thd_err_mesg = 'Total harmonic distortion for {:0.1f}Hz is {:0.3}'
+nf_err_mesg = 'Power at {:0.1f}Hz of {:0.1f}dB near noise floor of {:0.1f}dB'
 
-def acquire_tone(frequency, vrms, waveform_averages, fft_averages, duration, ao,
-                 ai, ao_fs, ai_fs, output_gain, ref_mic_gain, exp_mic_gain,
-                 callback=None):
+def _to_sens(output_spl, output_gain, vrms):
+    # Convert SPL to value expected at 0 dB gain and 1 VRMS
+    norm_spl = output_spl-output_gain-db(vrms)
+    return -norm_spl-db(20e-6)
 
-    epochs = waveform_averages*fft_averages
+
+def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd, input_gain,
+                  input_calibration, output_gain, vrms):
+
+    nf_rms = np.mean(tone_power_conv(nf_signal, fs, frequency, 'flattop'))
+    measured_thd = np.mean(thd(signal, fs, frequency, 3, 'flattop'))
+    rms = np.mean(tone_power_conv(signal, fs, frequency, 'flattop'))
+    _check_calibration(frequency, rms, nf_rms, min_db, measured_thd, max_thd)
+
+    # Convert to SPL if input calibration is provided
+    if input_calibration is not None:
+        output_spl = input_calibration.get_spl(frequency, rms)-input_gain
+        return _to_sens(output_spl, output_gain, vrms)
+    return db(rms)-input_gain
+
+
+def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
+    if db(rms, nf_rms) < min_db:
+        m = nf_err_mesg.format(frequency, db(rms), db(nf_rms))
+        raise CalibrationError(m)
+    if thd > max_thd:
+        m = thd_err_mesg.format(frequency, thd)
+        raise CalibrationError(m)
+
+
+def tone_calibration(frequency, output_gain=31.5, input_gain=20, vrms=1,
+                     input_calibration=None, repetitions=1, fs=200e3,
+                     max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
+    '''
+    Single output calibration at a fixed frequency
+
+    Returns
+    -------
+    sens : dB (V/Pa)
+        Sensitivity of output in dB (V/Pa).
+    '''
     calibration = LinearCalibration.as_attenuation(vrms=vrms)
-    waveform = blocks.Tone(frequency=frequency, level=0)
-    acq = ni.DAQmxAcquire(waveform, epochs, ao, ai, output_gain,
-                          calibration=calibration, callback=callback,
-                          duration=duration, adc_fs=ai_fs, dac_fs=ao_fs)
-    acq.start()
-    acq.join()
+    c = ni.DAQmxChannel(calibration=calibration)
+    trim_n = int(trim*fs)
 
-
-def analyze_tone(waveforms, frequency, vrms, waveform_averages, fft_averages,
-                 ai_fs, output_gain, ref_mic_gain, exp_mic_gain, ref_mic_sens,
-                 exp_mic_sens=None, trim=0, thd_harmonics=2):
-
-    trim_n = int(trim*ai_fs)
-    waveforms = waveforms[:, :, trim_n:-trim_n]
-    c, t = waveforms.shape[-2:]
-
-    # Average time samples
-    waveforms = waveforms.reshape((waveform_averages, fft_averages, c, t))
-    waveforms = waveforms.mean(axis=0)
-
-    # Get average PSD
-    s_freq, s_psd = psd(waveforms, ai_fs, window='flattop')
-    exp_psd, ref_psd = db(s_psd).mean(axis=0)
-
-    # Get average tone power across channels
-    power = tone_power_conv(waveforms, ai_fs, frequency, window='flattop')
-    exp_power, ref_power = db(power).mean(axis=0)
-
-    exp_waveform, ref_waveform = waveforms.mean(axis=0)
-    time = np.arange(len(exp_waveform))/ai_fs
-
-    # Correct for gains (i.e. we want to know the *actual* Vrms at 0 dB input
-    # and 0 dB output gain).
-    exp_psd -= exp_mic_gain
-    exp_power -= exp_mic_gain
-    ref_psd -= ref_mic_gain
-    ref_power -= ref_mic_gain
-
-    max_harmonic = int(np.floor((ai_fs/2.0)/frequency))
-    harmonics = []
-    for i in range(1, max_harmonic+1):
-        f_harmonic = frequency*i
-        p = tone_power_conv(waveforms, ai_fs, f_harmonic, window='flattop')
-        exp_harmonic, ref_harmonic = db(p).mean(axis=0)
-        harmonics.append({
-            'harmonic': i,
-            'frequency': f_harmonic,
-            'exp_mic_rms': exp_harmonic,
-            'ref_mic_rms': ref_harmonic
-        })
-
-    ref_harmonic_v = []
-    exp_harmonic_v = []
-    for h_info in harmonics:
-        ref_harmonic_v.append(dbi(h_info['ref_mic_rms']))
-        exp_harmonic_v.append(dbi(h_info['exp_mic_rms']))
-    ref_harmonic_v = np.asarray(ref_harmonic_v)[:(thd_harmonics+1)]
-    exp_harmonic_v = np.asarray(exp_harmonic_v)[:(thd_harmonics+1)]
-    ref_thd = (np.sum(ref_harmonic_v[1:]**2)**0.5)/ref_harmonic_v[0]
-    exp_thd = (np.sum(exp_harmonic_v[1:]**2)**0.5)/exp_harmonic_v[0]
-
-    # Actual output SPL
-    output_spl = ref_power-ref_mic_sens-db(20e-6)
-
-    # Output SPL assuming 0 dB gain and 1 VRMS
-    norm_output_spl = output_spl-output_gain-db(vrms)
-
-    exp_mic_sens = exp_power+ref_mic_sens-ref_power
-
-    return {
-        'frequency': frequency,
-        'time': time,
-        'freq_psd': s_freq,
-        'ref_mic_rms': ref_power,
-        'ref_mic_psd': ref_psd,
-        'ref_thd': ref_thd,
-        'ref_mic_waveform': ref_waveform,
-        'exp_mic_rms': exp_power,
-        'exp_mic_psd': exp_psd,
-        'exp_thd': exp_thd,
-        'exp_mic_waveform': exp_waveform,
-        'output_spl': output_spl,
-        'norm_output_spl': norm_output_spl,
-        'harmonics': harmonics,
-        'exp_mic_sens': exp_mic_sens,
-        'waveforms': waveforms,
+    daq_kw = {
+        'channels': [c],
+        'repetitions': repetitions,
+        'output_line': '/Dev1/ao0',
+        'input_line': '/Dev1/ai1',
+        'gain': output_gain,
+        'adc_fs': fs,
+        'dac_fs': fs,
+        'duration': duration,
+        'iti': 0.01
     }
 
+    # Measure the noise floor
+    c.token = blocks.Silence()
+    nf_signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
 
-class ToneCalibrationResult(HasTraits):
+    # Measure the actual output
+    c.token = blocks.Tone(frequency=frequency, level=0)
+    signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+
+    return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
+                         input_gain, input_calibration, output_gain, vrms)
+
+
+def two_tone_calibration(f1_frequency, f2_frequency, output_gain=31.5,
+                         input_gain=20, vrms=1, input_calibration=None,
+                         repetitions=1, fs=200e3, max_thd=0.01, min_db=10,
+                         duration=0.1, trim=0.01):
+    '''
+    Dual output calibration with each output at a different frequency
+
+    .. note::
+        If one frequency is a harmonic of the other, the calibration will fail
+        due to the THD measure.  This function is typically most useful for
+        calibration of the f1 and f2 DPOAE frequencies (which are not harmonics
+        of each other).
+    '''
+    calibration = LinearCalibration.as_attenuation(vrms=vrms)
+    c1 = ni.DAQmxChannel(calibration=calibration)
+    c2 = ni.DAQmxChannel(calibration=calibration)
+
+    trim_n = int(trim*fs)
+
+    daq_kw = {
+        'channels': [c1, c2],
+        'repetitions': repetitions,
+        'output_line': '/Dev1/ao0:1',
+        'input_line': '/Dev1/ai1',
+        'gain': output_gain,
+        'adc_fs': fs,
+        'dac_fs': fs,
+        'duration': duration,
+        'iti': 0.01
+    }
+
+    # Measure the noise floor
+    c1.token = blocks.Silence()
+    c2.token = blocks.Silence()
+    nf_signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+
+    # Measure the actual output
+    c1.token = blocks.Tone(frequency=f1_frequency, level=0)
+    c2.token = blocks.Tone(frequency=f2_frequency, level=0)
+    signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+
+    f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd,
+                       input_gain, input_calibration, output_gain, vrms)
+    f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd,
+                       input_gain, input_calibration, output_gain, vrms)
+    return f1, f2
+
+
+class SpeakerToneCalibrationResult(HasTraits):
 
     frequency = Float(save=True)
     time = Array(save=True)
     freq_psd = Array(save=True)
-    ref_mic_rms = Float(save=True)
-    ref_mic_psd = Array(save=True)
-    ref_thd = Float(save=True)
-    ref_mic_waveform = Array(save=True)
-    exp_mic_rms = Float(save=True)
-    exp_mic_psd = Array(save=True)
-    exp_thd = Float(save=True)
-    exp_mic_waveform = Array(save=True)
+    mic_rms = Float(save=True)
+    mic_psd = Array(save=True)
+    thd = Float(save=True)
+    mic_waveform = Array(save=True)
     output_spl = Float(save=True)
     norm_output_spl = Float(save=True)
-    exp_mic_sens = Float(save=True)
+    speaker_sens = Float(save=True)
     waveforms = Array(save=True)
 
     harmonics = List()
@@ -152,12 +174,8 @@ class ToneCalibrationResult(HasTraits):
     traits_view = View(
         VGroup(
             HGroup(
-                'exp_mic_rms',
-                Item('exp_thd', label='THD (frac)'),
-            ),
-            HGroup(
-                'ref_mic_rms',
-                Item('ref_thd', label='THD (frac)'),
+                'mic_rms',
+                Item('thd', label='THD (frac)'),
             ),
             'output_spl',
             VGroup(
@@ -171,7 +189,60 @@ class ToneCalibrationResult(HasTraits):
     )
 
 
-class ToneCalibrationController(Controller):
+class MicToneCalibrationResult(HasTraits):
+
+    frequency = Float(save=True)
+    time = Array(save=True)
+    freq_psd = Array(save=True)
+    ref_mic_rms = Float(save=True, label='Ref. mic. RMS')
+    ref_mic_psd = Array(save=True)
+    ref_thd = Float(save=True)
+    ref_mic_waveform = Array(save=True)
+    exp_mic_rms = Float(save=True, label='Exp. mic. RMS')
+    exp_mic_psd = Array(save=True)
+    exp_thd = Float(save=True)
+    exp_mic_waveform = Array(save=True)
+    output_spl = Float(save=True, label='Output (dB SPL)')
+    norm_output_spl = Float(save=True, label='Norm. output (dB SPL)')
+    exp_mic_sens = Float(save=True)
+    waveforms = Array(save=True)
+    output_gain = Float(save=True)
+
+    harmonics = List()
+
+    waveform_plots = Instance(Component)
+    spectrum_plots = Instance(Component)
+    harmonic_plots = Instance(Component)
+
+    traits_view = View(
+        VGroup(
+            HGroup(
+                VGroup(
+                    'exp_mic_rms',
+                    'ref_mic_rms',
+                    'output_spl',
+                    'norm_output_spl',
+                ),
+                VGroup(
+                    Item('exp_thd', label='THD (frac)'),
+                    Item('ref_thd', label='THD (frac)'),
+                    Item('output_gain', label='Gain (dB)')
+                ),
+            ),
+            VGroup(
+                Item('waveform_plots', editor=ComponentEditor(size=(600, 250))),
+                Item('spectrum_plots', editor=ComponentEditor(size=(600, 250))),
+                Item('harmonic_plots', editor=ComponentEditor(size=(600, 250))),
+                show_labels=False,
+            ),
+            style='readonly',
+        )
+    )
+
+
+class BaseToneCalibrationController(Controller):
+
+    calibration_accepted = Bool(False)
 
     # Is handler currently acquiring data?
     running = Bool(False)
@@ -181,12 +252,19 @@ class ToneCalibrationController(Controller):
 
     epochs_acquired = Int(0)
     iface_daq = Instance('cochlear.nidaqmx.DAQmxAcquire')
-    model = Instance('ToneCalibration')
-    frequencies = List
+    model = Instance('BaseToneCalibration')
     current_frequency = Float(label='Current frequency (Hz)')
+    frequencies = List
 
-    def run_reference_calibration(self, info=None):
-        pass
+    gain_step = Float(10)
+    current_gain = Float(-20)
+    max_gain = Float(31.5)
+    min_gain = Float(-96.5)
+    current_max_gain = Float(31.5, label='Current max. gain (dB)')
+
+    waveform_buffer = Instance('numpy.ndarray')
+    fft_buffer = Instance('numpy.ndarray')
+    fftw = Instance('pyfftw.FFTW')
 
     def setup(self):
         self.running = True
@@ -195,19 +273,27 @@ class ToneCalibrationController(Controller):
         calibration = LinearCalibration.as_attenuation(vrms=self.model.vrms)
         waveform = blocks.Tone(frequency=self.current_frequency, level=0)
         epochs = self.model.waveform_averages*self.model.fft_averages
-        self.iface_daq = ni.DAQmxAcquire(waveform,
+        samples = int(self.model.duration*self.model.fs)
+        buffer_shape = (epochs, 2, samples)
+        if (self.waveform_buffer) is None or \
+                (self.waveform_buffer.shape != buffer_shape):
+            self.waveform_buffer = pyfftw.n_byte_align_empty(buffer_shape, 16,
+                                                             dtype=np.float32)
+        self.iface_daq = ni.DAQmxAcquire([(self.model.output, waveform)],
                                          epochs,
-                                         self.model.output,
                                          self.model.inputs,
-                                         self.model.output_gain,
+                                         self.current_gain,
                                          calibration=calibration,
                                          callback=self.update_status,
                                          duration=self.model.duration,
-                                         adc_fs=self.model.adc_fs,
-                                         dac_fs=self.model.dac_fs)
+                                         adc_fs=self.model.fs,
+                                         dac_fs=self.model.fs,
+                                         waveform_buffer=self.waveform_buffer)
 
     def next_frequency(self):
         if self.frequencies:
+            self.current_gain = self.max_gain
+            self.current_max_gain = self.max_gain
             self.current_frequency = self.frequencies.pop(0)
             self.setup()
             self.iface_daq.start()
@@ -218,24 +304,345 @@ class ToneCalibrationController(Controller):
     def update_status(self, acquired, done):
         self.epochs_acquired = acquired
         if done:
-            results = analyze_tone(
-                waveforms=self.iface_daq.waveforms,
-                frequency=self.current_frequency,
-                vrms=self.model.vrms,
-                waveform_averages=self.model.waveform_averages,
-                fft_averages=self.model.fft_averages,
-                ai_fs=self.model.adc_fs,
-                output_gain=self.model.output_gain,
-                ref_mic_gain=self.model.ref_mic_gain,
-                exp_mic_gain=self.model.exp_mic_gain,
-                ref_mic_sens=self.model.ref_mic_sens_dbv,
-                trim=self.model.trim)
-            self.update_plots(results)
-            self.next_frequency()
+            waveforms = self.iface_daq.waveform_buffer
+            shape = list(waveforms.shape)
+            shape.insert(0, self.model.waveform_averages)
+            shape[1] = self.model.fft_averages
+            waveforms = waveforms.reshape(shape).mean(axis=0)
+            results = self.analyze(waveforms)
+            next_gain = self.next_gain(results)
+            if next_gain == self.current_gain:
+                self.update_plots(waveforms, results)
+                self.next_frequency()
+            elif next_gain >= self.current_max_gain:
+                self.update_plots(waveforms, results)
+                self.next_frequency()
+            elif next_gain <= self.min_gain:
+                self.update_plots(waveforms, results)
+                self.next_frequency()
+            else:
+                self.current_gain = next_gain
+                self.setup()
+                self.iface_daq.start()
 
-    def update_plots(self, results):
-        result = ToneCalibrationResult(**results)
+    def start(self, info):
+        self.model = info.object
+        self.model.tone_data = []
+        self.frequencies = self.model.frequency.tolist()
+        self.next_frequency()
 
+    def stop(self, info=None):
+        self.iface_daq.stop()
+
+    def save(self, info=None):
+        def save_traits(fh, obj, node):
+            for trait, value in obj.trait_get(save=True).items():
+                if not isinstance(value, basestring) and np.iterable(value):
+                    fh.create_array(node, trait, value)
+                else:
+                    fh.set_node_attr(node, trait, value)
+
+        filename = get_save_file(settings.CALIBRATION_DIR,
+                                 'Microphone calibration with tone|*.mic')
+        if filename is None:
+            return
+        with tables.open_file(filename, 'w') as fh:
+            save_traits(fh, self.model, fh.root)
+            for td in self.model.tone_data:
+                node_name = 'frequency_{}'.format(td.frequency)
+                td_node = fh.create_group(fh.root, node_name)
+                save_traits(fh, td, td_node)
+
+    def accept_calibration(self, info):
+        self.calibration_accepted = True
+        info.ui.dispose()
+
+    def cancel_calibration(self, info):
+        self.calibration_accepted = False
+        info.ui.dispose()
+
+
+class BaseToneCalibration(HasTraits):
+
+    # Calibration settings
+    fs = Float(400e3, label='AO/AI sampling rate (Hz)', save=True)
+
+    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', save=True)
+
+    output = Enum(('/Dev1/ao0', '/Dev1/ao1'), label='Output (channel)', save=True)
+    input_options = ['/Dev1/ai{}'.format(i) for i in range(4)]
+    exp_input = Enum('/Dev1/ai1', input_options, label='Exp. mic. (channel)', save=True)
+    inputs = Property(depends_on='exp_input, ref_input', save=True)
+    output_gain = Float(31.5, label='Output gain (dB)', save=True)
+
+    waveform_averages = Int(1, label='Number of tones per FFT', save=True)
+    fft_averages = Int(1, label='Number of FFTs', save=True)
+    iti = Float(0.001, label='Inter-tone interval', save=True)
+    trim = Float(0.001, label='Trim onset (sec)', save=True)
+
+    start_octave = Float(-1, label='Start octave', save=True)
+    start_frequency = Property(depends_on='start_octave', label='End octave', save=True)
+    end_octave = Float(5, save=True)
+    end_frequency = Property(depends_on='end_octave', save=True)
+    octave_spacing = Float(0.25, label='Octave spacing', save=True)
+
+    include_dpoae = Bool(True)
+
+    frequency = Property(depends_on='start_octave, end_octave, octave_spacing, include_dpoae', save=True)
+
+    def _get_frequency(self):
+        octaves = np.arange(self.start_octave,
+                            self.end_octave+self.octave_spacing,
+                            self.octave_spacing, dtype=np.float)
+        frequencies = (2.0**octaves)*1e3
+        if self.include_dpoae:
+            f2 = frequencies
+            f1 = f2/1.2
+            dpoae = 2*f2-f1
+            frequencies = np.concatenate((f2, f1, dpoae))
+            frequencies.sort()
+        return frequencies
+
+    def _get_start_frequency(self):
+        return (2**self.start_octave)*1e3
+
+    def _get_end_frequency(self):
+        return (2**self.end_octave)*1e3
+
+    vpp = Float(10, label='Tone amplitude (peak to peak)')
+    vrms = Property(depends_on='vpp', label='Tone amplitude (rms)')
+    duration = Float(0.04096, label='Tone duration (Hz)')
+
+    # Calibration results
+    measured_freq = List(save=True)
+    measured_spl = List(save=True)
+    spl_plots = Instance(Component)
+    thd_plots = Instance(Component)
+
+    def _get_vrms(self):
+        return self.vpp/np.sqrt(2)
+
+    hardware_settings = VGroup(
+        HGroup(
+            Item('output'),
+            Item('output_gain', label='Gain (dB)'),
+        ),
+        Include('mic_settings'),
+        label='Hardware settings',
+        show_border=True,
+    )
+
+    stimulus_settings = VGroup(
+        HGroup(
+            'vpp',
+            Item('vrms', style='readonly', label='(rms)'),
+        ),
+        HGroup(
+            VGroup(
+                'start_octave',
+                'end_octave'
+            ),
+            VGroup(
+                'start_frequency',
+                'end_frequency',
+                style='readonly',
+            ),
+        ),
+        'octave_spacing',
+        'duration',
+        'fft_averages',
+        'waveform_averages',
+        'iti',
+        'trim',
+        show_border=True,
+        label='Tone settings',
+    )
+
+    analysis_results = VGroup(
+        Tabbed(
+            VGroup(
+                Item('spl_plots', editor=ComponentEditor(size=(1200, 250))),
+                show_labels=False,
+                label='Summary',
+            ),
+            Item('tone_data', style='custom',
+                 editor=ListEditor(use_notebook=True, deletable=False,
+                                   export='DockShellWindow',
+                                   page_name='.frequency'),
+                 label='Tone data',
+                 ),
+            show_labels=False,
+        ),
+        style='readonly',
+    )
+
+    configuration = HSplit(
+        VGroup(
+            Include('hardware_settings'),
+            Include('stimulus_settings'),
+            enabled_when='not handler.running',
+        ),
+        VGroup(
+            VGroup(
+                Item('handler.epochs_acquired', style='readonly'),
+                Item('handler.current_gain', style='readonly', width=500),
+                Item('handler.current_max_gain', style='readonly', width=500),
+            ),
+            Include('analysis_results'),
+        ),
+    )
+
+
+class MicToneCalibration(BaseToneCalibration):
+
+    ref_input = Enum('/Dev1/ai2', BaseToneCalibration.input_options,
+                     label='Ref. mic. (channel)', save=True)
+
+    ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', save=True)
+    ref_mic_sens = Float(2.66, label='Ref. mic. sens (mV/Pa)', save=True)
+    ref_mic_sens_dbv = Property(depends_on='ref_mic_sens', save=True,
+                                label='Ref. mic. sens. V (dB re Pa)')
+
+    tone_data = List(Instance(MicToneCalibrationResult), ())
+    measured_exp_f1 = List(save=True)
+    measured_exp_f2 = List(save=True)
+    measured_exp_f3 = List(save=True)
+    measured_exp_thd = List(save=True)
+    measured_ref_f1 = List(save=True)
+    measured_ref_f2 = List(save=True)
+    measured_ref_f3 = List(save=True)
+    measured_ref_thd = List(save=True)
+    exp_mic_sens = List(save=True)
+
+    def _get_inputs(self):
+        return ','.join([self.exp_input, self.ref_input])
+
+    def _get_ref_mic_sens_dbv(self):
+        return db(self.ref_mic_sens*1e-3)
+
+    mic_settings = VGroup(
+        HGroup(
+            VGroup(
+                Item('exp_input', width=10),
+                Item('ref_input', width=10),
+            ),
+            VGroup(
+                Item('exp_mic_gain', label='Gain (dB)', width=10),
+                Item('ref_mic_gain', label='Gain (dB)', width=10),
+            ),
+        ),
+        HGroup(
+            'ref_mic_sens',
+            Item('ref_mic_sens_dbv', style='readonly', label='V (dB re Pa)'),
+        ),
+        label='Mecrophone settings',
+        show_border=True,
+    )
+
+    traits_view = View(
+        Include('configuration'),
+        toolbar=ToolBar(
+            '-',
+            Action(name='Ref. cal.', action='run_reference_calibration',
+                   image=ImageResource('tool', icon_dir),
+                   enabled_when='not handler.running'),
+            '-',
+            Action(name='Start', action='start',
+                   image=ImageResource('1rightarrow', icon_dir),
+                   enabled_when='not handler.running'),
+            Action(name='Stop', action='stop',
+                   image=ImageResource('Stop', icon_dir),
+                   enabled_when='handler.running'),
+            '-',
+            Action(name='Save', action='save',
+                   image=ImageResource('document_save', icon_dir),
+                   enabled_when='handler.acquired')
+        ),
+        resizable=True,
+        height=0.95,
+        width=0.5,
+        id='cochlear.ToneMicCal',
+    )
+
+
+class SpeakerToneCalibration(BaseToneCalibration):
+
+    def _get_inputs(self):
+        return self.exp_input
+
+    tone_data = List(Instance(SpeakerToneCalibrationResult), ())
+    measured_f1 = List(save=True)
+    measured_f2 = List(save=True)
+    measured_f3 = List(save=True)
+    measured_thd = List(save=True)
+    speaker_sens = List(save=True)
+
+    mic_settings = VGroup(
+        HGroup(
+            Item('exp_input'),
+            Item('exp_mic_gain', label='Gain (dB)'),
+        ),
+        label='Microphone settings',
+        show_border=True,
+    )
+
+    traits_view = View(
+        Include('configuration'),
+        toolbar=ToolBar(
+            '-',
+            Action(name='Start', action='start',
+                   image=ImageResource('1rightarrow', icon_dir),
+                   enabled_when='not handler.running'),
+            Action(name='Stop', action='stop',
+                   image=ImageResource('Stop', icon_dir),
+                   enabled_when='handler.running'),
+            '-',
+            Action(name='Accept', action='accept_calibration',
+                   image=ImageResource('dialog_ok_apply', icon_dir),
+                   enabled_when='handler.acquired'),
+            Action(name='Cancel', action='cancel_calibration',
+                   image=ImageResource('dialog_cancel', icon_dir),
+                   enabled_when='handler.acquired'),
+        ),
+        resizable=True,
+        height=0.95,
+        width=0.5,
+        id='cochlear.ToneMicCal',
+    )
+
+
+class MicToneCalibrationController(BaseToneCalibrationController):
+
+    def next_gain(self, results):
+        if results['exp_thd'] >= 0.01:
+            self.current_max_gain = self.current_gain
+            return self.current_gain - self.gain_step
+        elif results['exp_mic_rms'] <= -15:
+            return self.current_gain + self.gain_step
+        else:
+            return self.current_gain
+
+    def analyze(self, waveforms):
+        return analyze_mic_sens(
+            ref_waveforms=waveforms[:, 1, :],
+            exp_waveforms=waveforms[:, 0, :],
+            frequency=self.current_frequency,
+            vrms=self.model.vrms,
+            fs=self.model.fs,
+            output_gain=self.current_gain,
+            ref_mic_gain=self.model.ref_mic_gain,
+            exp_mic_gain=self.model.exp_mic_gain,
+            ref_mic_sens=self.model.ref_mic_sens_dbv,
+            trim=self.model.trim)
+
+    def update_plots(self, waveforms, results):
+        mic_psd = db(psd(waveforms, self.model.fs, 'hanning')).mean(axis=0)
+        results['ref_mic_psd'] = mic_psd[1]
+        results['exp_mic_psd'] = mic_psd[0]
+        results['freq_psd'] = psd_freq(waveforms, self.model.fs)
+
+        result = MicToneCalibrationResult(**results)
+        frequency = results['frequency']
         ds = ArrayPlotData(freq_psd=results['freq_psd'],
                            exp_mic_psd=results['exp_mic_psd'],
                            ref_mic_psd=results['ref_mic_psd'],
@@ -247,11 +654,13 @@ class ToneCalibrationController(Controller):
         container = HPlotContainer(bgcolor='white', padding=10)
         plot = Plot(ds)
         plot.plot(('time', 'ref_mic_waveform'), color='black')
-        plot.index_range.high_setting = 5.0/self.current_frequency
+        plot.index_range.low_setting = self.model.trim
+        plot.index_range.high_setting = 5.0/frequency+self.model.trim
         container.add(plot)
         plot = Plot(ds)
         plot.plot(('time', 'exp_mic_waveform'), color='red')
-        plot.index_range.high_setting = 5.0/self.current_frequency
+        plot.index_range.low_setting = self.model.trim
+        plot.index_range.high_setting = 5.0/frequency+self.model.trim
         container.add(plot)
         result.waveform_plots = container
 
@@ -272,7 +681,7 @@ class ToneCalibrationController(Controller):
         harmonic_container = HPlotContainer(resizable='hv', bgcolor='white',
                                             fill_padding=True, padding=10)
         for i in range(3):
-            f_harmonic = results['harmonics'][i]['frequency']
+            f_harmonic = results['exp_harmonics'][i]['frequency']
             plot = Plot(ds)
             plot.plot(('freq_psd', 'ref_mic_psd'), color='black')
             plot.plot(('freq_psd', 'exp_mic_psd'), color='red')
@@ -294,7 +703,7 @@ class ToneCalibrationController(Controller):
         self.model.exp_mic_sens.append(results['exp_mic_sens'])
         for mic in ('ref', 'exp'):
             for h in range(3):
-                v = results['harmonics'][h]['{}_mic_rms'.format(mic)]
+                v = results['{}_harmonics'.format(mic)][h]['mic_rms']
                 name = 'measured_{}_f{}'.format(mic, h+1)
                 getattr(self.model, name).append(v)
             v = results['{}_thd'.format(mic)]
@@ -335,225 +744,135 @@ class ToneCalibrationController(Controller):
 
         self.model.spl_plots = container
 
-    def start(self, info):
-        self.model = info.object
-        self.model.tone_data = []
-        self.frequencies = self.model.frequency.tolist()
-        self.next_frequency()
 
-    def stop(self, info=None):
-        self.iface_daq.stop()
+class SpeakerToneCalibrationController(BaseToneCalibrationController):
 
-    def save(self, info=None):
-        def save_traits(fh, obj, node):
-            for trait, value in obj.trait_get(save=True).items():
-                print trait
-                if not isinstance(value, basestring) and np.iterable(value):
-                    fh.create_array(node, trait, value)
-                else:
-                    fh.set_node_attr(node, trait, value)
+    mic_cal = Instance('neurogen.calibration.LinearCalibration')
 
-        filename = get_save_file(settings.CALIBRATION_DIR,
-                                 'Microphone calibration with tone|*.mic')
-        if filename is None:
-            return
-        with tables.open_file(filename, 'w') as fh:
-            save_traits(fh, self.model, fh.root)
-            for td in self.model.tone_data:
-                node_name = 'frequency_{}'.format(td.frequency)
-                td_node = fh.create_group(fh.root, node_name)
-                save_traits(fh, td, td_node)
+    def analyze(self, waveforms):
+        result = analyze_tone(
+            waveforms=waveforms[:, 0, :],
+            frequency=self.current_frequency,
+            waveform_averages=self.model.waveform_averages,
+            fft_averages=self.model.fft_averages,
+            fs=self.model.fs,
+            mic_gain=self.model.exp_mic_gain,
+            trim=self.model.trim)
+        mic_rms = dbi(result['mic_rms'])
+        output_spl = self.mic_cal.get_spl(self.current_frequency, mic_rms)
+        norm_output_spl = output_spl-self.model.output_gain-db(self.model.vrms)
+        speaker_sens = -(norm_output_spl+db(20e-6))
+        result.update({
+            'output_spl': output_spl,
+            'norm_output_spl': norm_output_spl,
+            'speaker_sens': speaker_sens
+        })
+        return result
+
+    def update_plots(self, results):
+        result = SpeakerToneCalibrationResult(**results)
+        frequency = results['frequency']
+
+        ds = ArrayPlotData(freq_psd=results['freq_psd'],
+                           mic_psd=results['mic_psd'],
+                           time=results['time'],
+                           mic_waveform=results['mic_waveform'])
+
+        # Set up the waveform plot
+        plot = Plot(ds)
+        plot.plot(('time', 'mic_waveform'), color='black')
+        plot.index_range.high_setting = 5.0/frequency
+        result.waveform_plots = plot
+
+        # Set up the spectrum plot
+        plot = Plot(ds)
+        plot.plot(('freq_psd', 'mic_psd'), color='black')
+        plot.index_scale = 'log'
+        plot.title = 'Microphone response'
+        plot.padding = 50
+        plot.index_range.low_setting = 100
+        result.spectrum_plots = plot
+
+        # Plot the fundamental (i.e. the tone) and first even/odd harmonics
+        harmonic_container = HPlotContainer(resizable='hv', bgcolor='white',
+                                            fill_padding=True, padding=10)
+        for i in range(3):
+            f_harmonic = results['harmonics'][i]['frequency']
+            plot = Plot(ds)
+            plot.plot(('freq_psd', 'mic_psd'), color='black')
+            plot.index_range.low_setting = f_harmonic-500
+            plot.index_range.high_setting = f_harmonic+500
+            plot.origin_axis_visible = True
+            plot.padding_left = 10
+            plot.padding_right = 10
+            plot.border_visible = True
+            plot.title = 'F{}'.format(i+1)
+            harmonic_container.add(plot)
+        result.harmonic_plots = harmonic_container
+
+        self.model.tone_data.append(result)
+
+        # Update the master overview
+        self.model.measured_freq.append(results['frequency'])
+        self.model.measured_spl.append(results['output_spl'])
+        self.model.speaker_sens.append(results['speaker_sens'])
+        for h in range(3):
+            v = results['harmonics'][h]['mic_rms']
+            name = 'measured_f{}'.format(h+1)
+            getattr(self.model, name).append(v)
+        v = results['thd']
+        getattr(self.model, 'measured_thd').append(v)
+
+        ds = ArrayPlotData(
+            frequency=self.model.measured_freq,
+            spl=self.model.measured_spl,
+            measured_thd=self.model.measured_thd,
+            speaker_sens=self.model.speaker_sens,
+        )
+
+        container = VPlotContainer(padding=10, bgcolor='white',
+                                   fill_padding=True, resizable='hv')
+        plot = Plot(ds)
+        plot.plot(('frequency', 'spl'), color='black')
+        plot.plot(('frequency', 'spl'), color='black', type='scatter')
+        plot.index_scale = 'log'
+        plot.title = 'Speaker output (dB SPL)'
+        container.add(plot)
+
+        plot = Plot(ds)
+        plot.plot(('frequency', 'measured_thd'), color='black')
+        plot.plot(('frequency', 'measured_thd'), color='black', type='scatter')
+        plot.index_scale = 'log'
+        plot.title = 'Total harmonic distortion (frac)'
+        container.add(plot)
+
+        plot = Plot(ds)
+        plot.plot(('frequency', 'speaker_sens'), color='red')
+        plot.plot(('frequency', 'speaker_sens'), color='red', type='scatter')
+        plot.index_scale = 'log'
+        plot.title = 'Speaker sensitivity V (dB re Pa)'
+        container.add(plot)
+        self.model.spl_plots = container
 
 
-class ToneCalibration(HasTraits):
+def launch_mic_cal_gui(**kwargs):
+    handler = MicToneCalibrationController()
+    MicToneCalibration().edit_traits(handler=handler, **kwargs)
 
-    # Calibration settings
-    adc_fs = Float(200e3, label='Analog input sampling rate (Hz)', save=True)
-    dac_fs = Float(200e3, label='Analog output sampling rate (Hz)', save=True)
 
-    ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', save=True)
-    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', save=True)
-    ref_mic_sens = Float(2.66, label='Ref. mic. sens (mV/Pa)', save=True)
-    ref_mic_sens_dbv = Property(depends_on='ref_mic_sens', save=True,
-                                label='Ref. mic. sens. V (dB re Pa)')
-
-    input_options = ['/Dev1/ai{}'.format(i) for i in range(4)]
-    output = Enum(('/Dev1/ao0', '/Dev1/ao1'), label='Output (channel)', save=True)
-    exp_input = Enum('/Dev1/ai1', input_options, label='Exp. mic. (channel)', save=True)
-    ref_input = Enum('/Dev1/ai2', input_options, label='Ref. mic. (channel)', save=True)
-    inputs = Property(depends_on='exp_input, ref_input', save=True)
-    output_gain = Float(31.5, label='Output gain (dB)', save=True)
-
-    waveform_averages = Int(2, label='Number of tones per FFT', save=True)
-    fft_averages = Int(2, label='Number of FFTs', save=True)
-    iti = Float(0.001, label='Inter-tone interval', save=True)
-    trim = Float(0.01, label='Trim (sec)', save=True)
-    trim_n = Property(depends_on='trim, adc_fs', save=True)
-
-    start_octave = Float(-2, label='Start octave', save=True)
-    start_frequency = Property(depends_on='start_octave', label='End octave', save=True)
-    end_octave = Float(5, save=True)
-    end_frequency = Property(depends_on='end_octave', save=True)
-    octave_spacing = Float(1, label='Octave spacing', save=True)
-
-    frequency = Property(depends_on='start_octave, end_octave, octave_spacing', save=True)
-
-    def _get_frequency(self):
-        octaves = np.arange(self.start_octave,
-                            self.end_octave+self.octave_spacing,
-                            self.octave_spacing, dtype=np.float)
-        return (2.0**octaves)*1e3
-
-    def _get_start_frequency(self):
-        return (2**self.start_octave)*1e3
-
-    def _get_end_frequency(self):
-        return (2**self.end_octave)*1e3
-
-    vpp = Float(10, label='Tone amplitude (peak to peak)')
-    vrms = Property(depends_on='vpp', label='Tone amplitude (rms)')
-    duration = Float(0.1, label='Tone duration (Hz)')
-
-    averages = Property(depends_on='fft_averages, waveform_averages',
-                        label='Number of repeats')
-
-    # Calibration results
-    ref_mic_rms = Float(label='Ref. mic. power (dB re V)')
-    exp_mic_rms = Float(label='Exp. mic. power (dB re V)')
-    ref_thd = Float(label='THD in ref. signal (frac)')
-    exp_thd = Float(label='THD in exp. signal (frac)')
-    output_spl = Float(label='Speaker output (dB SPL)')
-
-    #waveform_plots = Instance(Component)
-    #spectrum_plots = Instance(Component)
-    #harmonic_plots = Instance(Component)
-
-    tone_data = List(Instance(ToneCalibrationResult), ())
-
-    measured_freq = List(save=True)
-    measured_spl = List(save=True)
-    measured_exp_f1 = List(save=True)
-    measured_exp_f2 = List(save=True)
-    measured_exp_f3 = List(save=True)
-    measured_exp_thd = List(save=True)
-    measured_ref_f1 = List(save=True)
-    measured_ref_f2 = List(save=True)
-    measured_ref_f3 = List(save=True)
-    measured_ref_thd = List(save=True)
-    exp_mic_sens = List(save=True)
-
-    spl_plots = Instance(Component)
-    thd_plots = Instance(Component)
-
-    def _get_ref_mic_sens_dbv(self):
-        return db(self.ref_mic_sens*1e-3)
-
-    def _get_inputs(self):
-        return ','.join([self.exp_input, self.ref_input])
-
-    def _get_vrms(self):
-        return self.vpp/np.sqrt(2)
-
-    def _get_averages(self):
-        return self.fft_averages*self.waveform_averages
-
-    def _get_trim_n(self):
-        return int(self.trim*self.adc_fs)
-
-    hardware_settings = VGroup(
-        HGroup(
-            Item('output'),
-            Item('output_gain', label='Gain (dB)'),
-        ),
-        HGroup(
-            Item('exp_input'),
-            Item('exp_mic_gain', label='Gain (dB)'),
-        ),
-        HGroup(
-            Item('ref_input'),
-            Item('ref_mic_gain', label='Gain (dB)'),
-        ),
-        label='Hardware settings',
-        show_border=True,
-    )
-
-    stimulus_settings = VGroup(
-        Item('vrms', style='readonly'),
-        'vpp',
-        HGroup('start_octave', 'start_frequency'),
-        HGroup('end_octave', 'end_frequency'),
-        'octave_spacing',
-        'duration',
-        'fft_averages',
-        'waveform_averages',
-        'iti',
-        'trim',
-        Item('averages', style='readonly'),
-        show_border=True,
-        label='Tone settings',
-    )
-
-    mic_settings = VGroup(
-        'ref_mic_sens',
-        Item('ref_mic_sens_dbv', style='readonly'),
-        label='Microphone settings',
-        show_border=True,
-    )
-
-    analysis_results = VGroup(
-        Tabbed(
-            Item('tone_data', style='custom',
-                 editor=ListEditor(use_notebook=True, deletable=False,
-                                   export='DockShellWindow',
-                                   page_name='.frequency'),
-                 ),
-            VGroup(
-                Item('spl_plots', editor=ComponentEditor(size=(1200, 250))),
-                show_labels=False,
-            ),
-            show_labels=False,
-        ),
-        style='readonly',
-    )
-
-    traits_view = View(
-        HSplit(
-            VGroup(
-                Include('hardware_settings'),
-                Include('mic_settings'),
-                Include('stimulus_settings'),
-                enabled_when='not handler.running',
-            ),
-            VGroup(
-                HGroup(
-                    Item('handler.epochs_acquired', style='readonly'),
-                ),
-                Include('analysis_results'),
-            ),
-        ),
-        toolbar=ToolBar(
-            '-',
-            Action(name='Ref. cal.', action='run_reference_calibration',
-                   image=ImageResource('tool', icon_dir),
-                   enabled_when='not handler.running'),
-            '-',
-            Action(name='Start', action='start',
-                   image=ImageResource('1rightarrow', icon_dir),
-                   enabled_when='not handler.running'),
-            Action(name='Stop', action='stop',
-                   image=ImageResource('Stop', icon_dir),
-                   enabled_when='handler.running'),
-            '-',
-            Action(name='Save', action='save',
-                   image=ImageResource('document_save', icon_dir),
-                   enabled_when='handler.acquired')
-        ),
-        resizable=True,
-        height=0.95,
-        width=0.95,
-        id='cochlear.ToneCal',
-    )
+def launch_speaker_cal_gui(output, mic_cal, **kwargs):
+    handler = SpeakerToneCalibrationController(mic_cal=mic_cal)
+    model = SpeakerToneCalibration()
+    model.edit_traits(handler=handler, **kwargs)
+    if not handler.calibration_accepted:
+        return None
+    return LinearCalibration(model.frequency, model.speaker_sens)
 
 
 if __name__ == '__main__':
-    ToneCalibration().configure_traits(handler=ToneCalibrationController())
+    handler = MicToneCalibrationController()
+    MicToneCalibration().configure_traits(handler=handler)
+    #filename = 'c:/data/cochlear/calibration/ABR frequencies.mic'
+    #mic_cal = LinearCalibration.from_mic_file(filename)
+    #handler = SpeakerToneCalibrationController(mic_cal=mic_cal)
+    #SpeakerToneCalibration().configure_traits(handler=handler)

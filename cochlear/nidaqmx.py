@@ -3,7 +3,6 @@ Classes for configuring and recording using NIDAQmx compatible devices
 '''
 
 # TODO setup DAQmxRegisterDoneEvent callback
-
 from __future__ import division
 
 import ctypes
@@ -525,7 +524,6 @@ class DAQmxChannel(Channel):
     def get_nearest_attenuation(self, atten):
         if self.attenuator is None:
             raise ValueError('Channel does not have attenuation control')
-        print 'getting nearest'
         return self.attenuator.get_nearest_atten(atten)
 
 
@@ -876,7 +874,6 @@ class DAQmxAttenControl(DAQmxBase):
             right = self._right_setting
         if left is None:
             left = self._left_setting
-        print right, left
         bits = self._gain_to_bits(right, left)
         self._send_bits(bits)
         self._right_setting = right
@@ -968,9 +965,9 @@ class DAQmxAttenControl(DAQmxBase):
 
 class DAQmxAcquire(object):
 
-    def __init__(self, signal, repetitions, output_line, input_line,
-                 gain, calibration, dac_fs=100e3, adc_fs=100e3, duration=1,
-                 iti=0.01, callback=None):
+    def __init__(self, channels, repetitions, output_line, input_line, gain,
+                 dac_fs=100e3, adc_fs=100e3, duration=1, iti=0.01,
+                 callback=None, waveform_buffer=None):
 
         for k, v in locals().items():
             setattr(self, k, v)
@@ -989,13 +986,18 @@ class DAQmxAcquire(object):
 
         self.iface_atten = DAQmxAttenControl()
         self.iface_atten.setup()
-        self.iface_atten.set_gain(gain)
+        self.iface_atten.set_gains(gain)
         self.iface_atten.clear()
 
-        channel = DAQmxChannel(token=signal, calibration=calibration,
-                               output_line=output_line, duration=duration)
-        self.iface_dac = DAQmxPlayer(fs=dac_fs, duration=duration)
-        self.iface_dac.add_channel(channel)
+        if waveform_buffer is None:
+            size = (repetitions, self.iface_adc.channels, int(duration*adc_fs))
+            waveform_buffer = np.empty(size, dtype=np.float32)
+        self.waveform_buffer = waveform_buffer
+
+        self.iface_dac = DAQmxPlayer(fs=dac_fs, duration=duration,
+                                     output_line=output_line)
+        for channel in channels:
+            self.iface_dac.add_channel(channel)
         self.iface_dac.queue_init('FIFO')
         self.iface_dac.queue_append(repetitions, iti)
 
@@ -1012,11 +1014,11 @@ class DAQmxAcquire(object):
 
     def poll(self):
         waveforms = self.iface_adc.read_analog()
+        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
+        self.waveform_buffer[lb:ub, :, :] = waveforms
         self.epochs_acquired += len(waveforms)
-        self.waveforms.append(waveforms)
         if self.epochs_acquired >= self.repetitions:
             self.stop()
-            self.waveforms = np.concatenate(self.waveforms, axis=0)
             self.complete = True
         if self.callback is not None:
             self.callback(self.epochs_acquired, self.complete)
@@ -1026,7 +1028,7 @@ def acquire(*args, **kwargs):
     daq = DAQmxAcquire(*args, **kwargs)
     daq.start()
     daq.join()
-    return daq.waveforms
+    return daq.waveform_buffer
 
 
 ################################################################################
