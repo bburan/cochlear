@@ -1,5 +1,5 @@
 from __future__ import division
-from cns import get_config
+#from cns import get_config
 
 from math import ceil
 from os import path
@@ -44,12 +44,12 @@ from experiment.channel import FileEpochChannel as FileSnippetChannel
 
 from experiment.util import load_instance, dump_instance
 
-from traitsui.menu import MenuBar, Menu, ActionGroup, Action
+from traitsui.menu import MenuBar, Menu, ActionGroup, Action)
 
 CHANNELS = 5
-PHYSIOLOGY_WILDCARD = get_config('PHYSIOLOGY_WILDCARD')
-SPIKE_SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
-SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
+#PHYSIOLOGY_WILDCARD = get_config('PHYSIOLOGY_WILDCARD')
+#SPIKE_SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
+#SNIPPET_SIZE = get_config('PHYSIOLOGY_SPIKE_SNIPPET_SIZE')
 VOLTAGE_SCALE = 1e6
 PHYSIOLOGY_ROOT = 'c:/data'
 
@@ -851,7 +851,7 @@ if __name__ == '__main__':
     # Create a temporary file (we can't create a temporary file using the
     # standard tempfile functions tables.openFile requires a string, not a
     # file-like object).
-    tempfile = os.path.join(get_config('TEMP_ROOT'), 'test_physiology.h5')
+    tempfile = os.path.join('c:/data', 'test_physiology.h5')
 
     # Run the experiment
     with tables.openFile(tempfile, 'w') as datafile:

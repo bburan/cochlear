@@ -9,11 +9,10 @@ from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
 from pyface.api import ImageResource
 
 from experiment import icon_dir
-from neurogen.calibration import LinearCalibration
+from neurogen.calibration import InterpCalibration
 
 from cochlear import settings
-from cochlear import calibration_chirp as cal_mic
-from cochlear import calibration_inear as cal_inear
+from cochlear import tone_calibration as cal
 from cochlear import abr_experiment
 from cochlear import dpoae_experiment
 
@@ -21,35 +20,16 @@ from cochlear import dpoae_experiment
 class ExperimentController(Controller):
 
     def run_microphone_calibration(self, info):
-        cal_mic.launch_gui(parent=info.ui.control, kind='livemodal')
+        cal.launch_mic_cal_gui(parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
-    def run_inear_cal_0(self, info):
-        calibration = cal_inear.launch_gui('ao0',
-                                           info.object.exp_mic_sens,
-                                           parent=info.ui.control,
-                                           kind='livemodal')
-        if calibration is not None:
-            info.object.inear_cal_0 = calibration
-
-    def run_inear_cal_1(self, info):
-        calibration = cal_inear.launch_gui('ao1',
-                                           info.object.exp_mic_sens,
-                                           parent=info.ui.control,
-                                           kind='livemodal')
-        if calibration is not None:
-            info.object.inear_cal_1 = calibration
-
     def run_abr_experiment(self, info):
-        abr_experiment.launch_gui(info.object.inear_cal_0,
-                                  parent=info.ui.control,
+        abr_experiment.launch_gui(info.object.mic_cal, parent=info.ui.control,
                                   kind='livemodal')
 
     def run_dpoae_experiment(self, info):
-        dpoae_experiment.launch_gui(info.object.inear_cal_0,
-                                    info.object.inear_cal_1,
-                                    info.object.exp_mic_sens,
-                                    parent=info.ui.control, kind='livemodal')
+        dpoae_experiment.launch_gui(info.object.mic_cal, parent=info.ui.control,
+                                    kind='livemodal')
 
 
 class ExperimentSetup(HasTraits):
@@ -63,9 +43,9 @@ class ExperimentSetup(HasTraits):
     calibrations = List
     calibration = Str
 
-    mic_cal = Instance('neurogen.calibration.LinearCalibration')
-    inear_cal_0 = Instance('neurogen.calibration.LinearCalibration')
-    inear_cal_1 = Instance('neurogen.calibration.LinearCalibration')
+    mic_cal = Instance('neurogen.calibration.Calibration')
+
+    def _filename():
 
     def _calibrations_default(self):
         return self._update_calibrations()
@@ -80,15 +60,11 @@ class ExperimentSetup(HasTraits):
         return ['Test', 'Brad', 'Stephen']
 
     def _get_animals(self):
-        return ['Test', 'Oyster', 'Truffle']
-
-    def _animal_changed(self):
-        self.inear_calibration = None
+        return ['Tarragon', 'Dill', 'Parsley']
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
-        self.mic_cal = LinearCalibration.from_mic_file(filename,
-                                                       check_mode='exact')
+        self.mic_cal = InterpCalibration.from_mic_file(filename)
 
     view = View(
         VGroup(
@@ -102,26 +78,13 @@ class ExperimentSetup(HasTraits):
             Action(name='Mic cal',
                    image=ImageResource('media_record', icon_dir),
                    action='run_microphone_calibration'),
-            Action(name='Left cal',
-                   image=ImageResource('speaker', icon_dir),
-                   enabled_when='mic_calibration is not None and '
-                                'animal is not None and '
-                                'experimenter is not None',
-                   action='run_inear_cal_0'),
-            Action(name='Right cal',
-                   image=ImageResource('speaker', icon_dir),
-                   enabled_when='mic_calibration is not None and '
-                                'animal is not None and '
-                                'experimenter is not None',
-                   action='run_inear_cal_1'),
             Action(name='ABR',
                    image=ImageResource('view_statistics', icon_dir),
-                   enabled_when='inear_cal_0 is not None',
+                   enabled_when='mic_cal is not None',
                    action='run_abr_experiment'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
-                   enabled_when='inear_cal_0 is not None and '
-                                'inear_cal_1 is not None',
+                   enabled_when='mic_cal is not None',
                    action='run_dpoae_experiment'),
         ),
     )

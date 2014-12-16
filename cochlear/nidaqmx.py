@@ -16,6 +16,8 @@ from neurogen.channel import Channel
 from neurogen.player import Player, QueuedPlayerMixin, ThreadPlayerMixin
 from neurogen.blocks import ScalarInput
 
+import threading
+
 import logging
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
@@ -46,8 +48,15 @@ class DAQmxDefaults(object):
     AO_RUN = '/{}/port0/line2'.format(DEV)
     AO_RANGE = 10
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
-    LEFT_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
-    RIGHT_SPEAKER_OUTPUT = '/{}/ao1'.format(DEV)
+    PRIMARY_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
+    SECONDARY_SPEAKER_OUTPUT = '/{}/ao1'.format(DEV)
+    AO0_ATTEN_CHANNEL = 'left'
+    AO1_ATTEN_CHANNEL = 'right'
+    PRIMARY_ATTEN_CHANNEL = AO0_ATTEN_CHANNEL
+    SECONDARY_ATTEN_CHANNEL = AO1_ATTEN_CHANNEL
+
+    AI_FS = 200e3
+    AO_FS = 200e3
 
     VOLUME_CLK = '/{}/port0/line4'.format(DEV)
     VOLUME_CS = '/{}/port0/line1'.format(DEV)
@@ -56,7 +65,7 @@ class DAQmxDefaults(object):
     VOLUME_ZC = '/{}/port1/line5'.format(DEV)
     DIO_CLOCK = '/{}/FreqOut'.format(DEV)
 
-    TRIGGER_DURATION = 10e-3
+    TRIGGER_DURATION = 1e-3
 
 
 ################################################################################
@@ -140,8 +149,7 @@ def create_continuous_ai(ai, fs, expected_range=10, callback=None,
                              ni.DAQmx_Val_ContSamps, 0)
     ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
     if callback is not None:
-        self.create_everynsamples_callback(task_analog, callback,
-                                            callback_samples)
+        create_everynsamples_callback(task_analog, callback, callback_samples)
     return task_analog
 
 
@@ -384,9 +392,11 @@ class DAQmxBase(object):
                 ni.DAQmxStopTask(task)
             except ni.DAQError:
                 pass
+        if hasattr(self, 'complete_callback') \
+                and self.complete_callback is not None:
+            self.complete_callback()
 
     def clear(self):
-        self._state = 'halted'
         for task in self._tasks:
             try:
                 ni.DAQmxClearTask(task)
@@ -431,6 +441,7 @@ class ContinuousDAQmxSource(DAQmxSource):
         super(ContinuousDAQmxSource, self).__init__()
         for k, v in locals().items():
             setattr(self, k, v)
+        self.setup()
 
     def setup(self):
         self._task_analog = create_continuous_ai(self.input_line, self.callback,
@@ -448,7 +459,8 @@ class TriggeredDAQmxSource(DAQmxSource):
                  counter_line=DAQmxDefaults.AI_COUNTER,
                  run_line=DAQmxDefaults.AI_RUN,
                  trigger_duration=DAQmxDefaults.TRIGGER_DURATION,
-                 callback=None):
+                 trigger_delay=0, callback=None, pipeline=None,
+                 complete_callback=None):
         '''
         Parameters
         ----------
@@ -474,20 +486,29 @@ class TriggeredDAQmxSource(DAQmxSource):
         callback : {None, callable}
             TODO
         '''
+        if callback is None and pipeline is None:
+            raise ValueError('Must provide callback or pipeline')
         super(TriggeredDAQmxSource, self).__init__()
         for k, v in locals().items():
             setattr(self, k, v)
-        self.epoch_size = int(epoch_duration * fs)
+        self.offset = int(trigger_delay * fs)
+        self.epoch_size = int(epoch_duration * fs) + self.offset
+        self.setup()
 
     def setup(self):
         self._task_analog, self._task_digital, self._cb_ptr = \
             create_retriggerable_ai(self.input_line, self.fs, self.epoch_size,
                                     self.trigger_line, self.expected_range,
                                     self.counter_line, self.run_line,
-                                    self.callback)
+                                    self.trigger_callback)
         self._tasks.extend((self._task_analog, self._task_digital))
         self.channels = num_channels(self._task_analog)
+        self._event = threading.Event()
         log.debug('Configured retriggerable AI with %d channels', self.channels)
+
+    def start(self):
+        self._event.clear()
+        super(TriggeredDAQmxSource, self).start()
 
     def read_timer(self):
         result = ctypes.c_uint32()
@@ -504,7 +525,22 @@ class TriggeredDAQmxSource(DAQmxSource):
         analog_data = super(TriggeredDAQmxSource, self).read_analog(timeout)
         epochs = int(analog_data.shape[-1]/self.epoch_size)
         analog_data.shape = self.channels, epochs, self.epoch_size
-        return analog_data.swapaxes(0, 1)
+        return analog_data.swapaxes(0, 1)[:, :, self.offset:]
+
+    def trigger_callback(self):
+        waveforms = self.read_analog()
+        try:
+            if self.callback is not None:
+                self.callback(waveforms)
+            if self.pipeline is not None:
+                self.pipeline.send(waveforms)
+        except GeneratorExit:
+            self._event.set()
+            self.stop()
+            self.complete = True
+
+    def join(self, timeout=None):
+        return self._event.wait(timeout)
 
 
 class DAQmxChannel(Channel):
@@ -630,7 +666,6 @@ class DAQmxAttenControl(DAQmxBase):
     # hold the sample line high for at least 20us).  This places an upper bound
     # of 10e6 on the clock frequency.  However, a more reasonable upper bound
     # is probably 1e6 (1GHz).  Minimum frequency is 6250 (100 kHz timebase/16).
-    #VOLUME_CLOCK_FREQ = 1e5
     VOLUME_CLOCK_FREQ = 1e4
 
     # Each bit is represented by two samples in the buffer to allow the serial
@@ -748,6 +783,7 @@ class DAQmxAttenControl(DAQmxBase):
     def setup(self):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
+        #self._lock.acquire()
         self._task_mute = create_task('Mute control')
         self._task_zc = create_task('ZC control')
 
@@ -966,6 +1002,9 @@ class DAQmxAttenControl(DAQmxBase):
         return np.clip(hw_atten, self.MIN_ATTEN, self.MAX_ATTEN)
 
 
+################################################################################
+# Primary interface for DAQ
+################################################################################
 class DAQmxAcquire(object):
 
     def __init__(self, channels, repetitions, output_line, input_line, gain,
@@ -984,7 +1023,6 @@ class DAQmxAcquire(object):
                                               epoch_duration=duration,
                                               input_line=input_line,
                                               callback=self.poll)
-        self.iface_adc.setup()
         self.iface_adc.start()
 
         self.iface_atten = DAQmxAttenControl()
@@ -1018,8 +1056,7 @@ class DAQmxAcquire(object):
         while not self.complete:
             time.sleep(0.1)
 
-    def poll(self):
-        waveforms = self.iface_adc.read_analog()
+    def poll(self, waveforms):
         lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
         self.waveform_buffer[lb:ub, :, :] = waveforms
         self.epochs_acquired += len(waveforms)

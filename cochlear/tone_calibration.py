@@ -27,8 +27,9 @@ from experiment import icon_dir
 from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
-from neurogen.calibration import (LinearCalibration, CalibrationError,
-                                  CalibrationTHDError, CalibrationNFError)
+from neurogen.calibration import (PointCalibration, InterpCalibration,
+                                  CalibrationError, CalibrationTHDError,
+                                  CalibrationNFError)
 from neurogen.util import db, dbi
 from neurogen.calibration.util import (analyze_mic_sens, analyze_tone,
                                        tone_power_conv, psd, psd_freq, thd)
@@ -54,8 +55,8 @@ def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
     nf_rms = np.mean(tone_power_conv(nf_signal, fs, frequency, 'flattop'))
     measured_thd = np.mean(thd(signal, fs, frequency, 3, 'flattop'))
     rms = np.mean(tone_power_conv(signal, fs, frequency, 'flattop'))
-    mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.4f}'
-    log.debug(mesg.format(db(nf_rms), db(rms), measured_thd))
+    mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.2f}%'
+    log.debug(mesg.format(db(nf_rms), db(rms), measured_thd*100))
     _check_calibration(frequency, rms, nf_rms, min_db, measured_thd, max_thd)
     return db(rms)-input_gain
 
@@ -69,19 +70,21 @@ def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
         raise CalibrationTHDError(m)
 
 
-def tone_power(frequency, gain=-40, vrms=1, input_gain=20, repetitions=1,
-               fs=200e3, max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
+def tone_power(frequency, gain=0, vrms=1, input_gain=20, repetitions=1,
+               fs=200e3, max_thd=0.1, min_db=10, duration=0.1, trim=0.01,
+               output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+               input_line=ni.DAQmxDefaults.MIC_INPUT):
 
-    calibration = LinearCalibration.as_attenuation(vrms=vrms)
+    calibration = InterpCalibration.as_attenuation(vrms=vrms)
     c = ni.DAQmxChannel(calibration=calibration)
     trim_n = int(trim*fs)
 
     daq_kw = {
         'channels': [c],
         'repetitions': repetitions,
-        'output_line': '/Dev1/ao0',
-        'input_line': '/Dev1/ai1',
-        'gain': (-np.inf, gain),
+        'output_line': output_line,
+        'input_line': input_line,
+        'gain': gain,
         'adc_fs': fs,
         'dac_fs': fs,
         'duration': duration,
@@ -116,7 +119,10 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
     '''
     output_spl = tone_spl(frequency, input_calibration, gain, vrms, *args,
                           **kwargs)
-    return _to_sens(output_spl, gain, vrms)
+    mesg = 'Output {:.2f}dB SPL at {:.2f}Hz, {:.2f}dB gain, {:.2f}Vrms'
+    log.debug(mesg.format(output_spl, frequency, gain, vrms))
+    output_sens = _to_sens(output_spl, gain, vrms)
+    return PointCalibration(frequency, output_sens)
 
 
 def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
@@ -131,8 +137,8 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
         calibration of the f1 and f2 DPOAE frequencies (which are not harmonics
         of each other).
     '''
-    cal1 = LinearCalibration.as_attenuation(vrms=f1_vrms)
-    cal2 = LinearCalibration.as_attenuation(vrms=f2_vrms)
+    cal1 = InterpCalibration.as_attenuation(vrms=f1_vrms)
+    cal2 = InterpCalibration.as_attenuation(vrms=f2_vrms)
     c1 = ni.DAQmxChannel(calibration=cal1)
     c2 = ni.DAQmxChannel(calibration=cal2)
     trim_n = int(trim*fs)
@@ -140,8 +146,8 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
     daq_kw = {
         'channels': [c1, c2],
         'repetitions': repetitions,
-        'output_line': '/Dev1/ao0:1',
-        'input_line': '/Dev1/ai1',
+        'output_line': ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
+        'input_line': ni.DAQmxDefaults.MIC_INPUT,
         'gain': (f2_gain, f1_gain),
         'adc_fs': fs,
         'dac_fs': fs,
@@ -198,9 +204,13 @@ def two_tone_calibration(f1_frequency, f2_frequency, input_calibration,
     f1_spl, f2_spl = two_tone_spl(f1_frequency, f2_frequency, input_calibration,
                                   f1_gain, f2_gain, f1_vrms, f2_vrms, *args,
                                   **kwargs)
+    mesg = '{} output {:.2f}dB SPL at {:.2f}Hz, {:.2f}dB gain, {:.2f}Vrms'
+    log.debug(mesg.format('Primary', f1_spl, f1_frequency, f1_gain, f1_vrms))
+    log.debug(mesg.format('Secondary', f2_spl, f2_frequency, f2_gain, f2_vrms))
     f1_sens = _to_sens(f1_spl, f1_gain, f1_vrms)
     f2_sens = _to_sens(f2_spl, f2_gain, f2_vrms)
-    return f1_sens, f2_sens
+    return PointCalibration(f1_frequency, f1_sens), \
+        PointCalibration(f2_frequency, f2_sens)
 
 
 def ceiling_spl(frequency, max_spl=80, initial_gain=-40, vrms=1, spl_step=5,
@@ -383,7 +393,7 @@ class BaseToneCalibrationController(Controller):
         self.running = True
         self.acquired = False
         self.epochs_acquired = 0
-        calibration = LinearCalibration.as_attenuation(vrms=self.model.vrms)
+        calibration = InterpCalibration.as_attenuation(vrms=self.model.vrms)
         waveform = blocks.Tone(frequency=self.current_frequency, level=0)
         epochs = self.model.waveform_averages*self.model.fft_averages
         samples = int(self.model.duration*self.model.fs)
@@ -860,7 +870,7 @@ class MicToneCalibrationController(BaseToneCalibrationController):
 
 class SpeakerToneCalibrationController(BaseToneCalibrationController):
 
-    mic_cal = Instance('neurogen.calibration.LinearCalibration')
+    mic_cal = Instance('neurogen.calibration.Calibration')
 
     def analyze(self, waveforms):
         result = analyze_tone(
@@ -979,13 +989,9 @@ def launch_speaker_cal_gui(output, mic_cal, **kwargs):
     model.edit_traits(handler=handler, **kwargs)
     if not handler.calibration_accepted:
         return None
-    return LinearCalibration(model.frequency, model.speaker_sens)
+    return InterpCalibration(model.frequency, model.speaker_sens)
 
 
 if __name__ == '__main__':
     handler = MicToneCalibrationController()
     MicToneCalibration().configure_traits(handler=handler)
-    #filename = 'c:/data/cochlear/calibration/ABR frequencies.mic'
-    #mic_cal = LinearCalibration.from_mic_file(filename)
-    #handler = SpeakerToneCalibrationController(mic_cal=mic_cal)
-    #SpeakerToneCalibration().configure_traits(handler=handler)
