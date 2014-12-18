@@ -25,13 +25,24 @@ class ExperimentController(Controller):
         cal.launch_mic_cal_gui(parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
+    def _get_filename(self, info, experiment):
+        datetime = dt.datetime.now()
+        filename = info.object.base_filename.format(
+            date=datetime.strftime('%Y%m%d'),
+            time=datetime.strftime('%H%M'),
+            experiment=experiment)
+        return os.path.join(settings.DATA_DIR, 'animals', filename)
+
     def run_abr_experiment(self, info):
-        abr_experiment.launch_gui(info.object.mic_cal, parent=info.ui.control,
-                                  kind='livemodal')
+        filename = self._get_filename(info, 'ABR')
+        print filename
+        abr_experiment.launch_gui(info.object.mic_cal, filename=filename,
+                                  parent=info.ui.control, kind='livemodal')
 
     def run_dpoae_experiment(self, info):
-        dpoae_experiment.launch_gui(info.object.mic_cal, parent=info.ui.control,
-                                    kind='livemodal')
+        filename = self._get_filename(info, 'DPOAE')
+        dpoae_experiment.launch_gui(info.object.mic_cal, filename=filename,
+                                    parent=info.ui.control, kind='livemodal')
 
 
 class ExperimentSetup(HasTraits):
@@ -93,11 +104,15 @@ class ExperimentSetup(HasTraits):
                    action='run_microphone_calibration'),
             Action(name='ABR',
                    image=ImageResource('view_statistics', icon_dir),
-                   enabled_when='mic_cal is not None',
+                   enabled_when='mic_cal is not None '
+                                'and animal '
+                                'and experimenter ',
                    action='run_abr_experiment'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
-                   enabled_when='mic_cal is not None',
+                   enabled_when='mic_cal is not None '
+                                'and animal '
+                                'and experimenter ',
                    action='run_dpoae_experiment'),
         ),
     )

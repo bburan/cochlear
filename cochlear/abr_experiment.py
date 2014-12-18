@@ -152,8 +152,9 @@ class ABRParadigm(AbstractParadigm):
     frequency = Expression(8e3, dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
-    level = Expression('exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 80], cycles=1)',
-                       dtype=np.float, **kw)
+    level = Expression(
+        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 80], c=1)',
+        dtype=np.float, **kw)
 
     traits_view = View(
         VGroup(
@@ -411,10 +412,12 @@ class ABRExperiment(AbstractExperiment):
     )
 
 
-def launch_gui(inear_cal, **kwargs):
-    with tables.open_file('test.hd5', 'w') as fh:
-        experiment = ABRExperiment(paradigm=ABRParadigm())
-        controller = ABRController(mic_cal=inear_cal)
+def launch_gui(mic_cal, filename, **kwargs):
+    with tables.open_file(filename, 'w') as fh:
+        data = ABRData(store_node=fh.root)
+        paradigm = ABRParadigm()
+        experiment = ABRExperiment(paradigm=paradigm, data=data)
+        controller = ABRController(mic_cal=mic_cal)
         experiment.edit_traits(handler=controller, **kwargs)
 
 
