@@ -59,8 +59,6 @@ def dpoae_reject(fs, dpoae, mic_cal, noise_floor, target):
         nf_spl, dp_spl = mic_cal.get_spl(dpoae, [nf_rms, dp_rms])
         if (nf_spl < noise_floor) or (nf_spl < dp_spl):
             target.send(raw_data)
-        else:
-            print 'reject'
 
 
 class DPOAEData(AbstractData):
@@ -89,6 +87,7 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imult(f2_frequency/1.2, 1/response_window)', **kw)
     f2_frequency = Expression('imult(8e3, 1/response_window)', **kw)
+
     f1_level = Expression('f2_level+10', **kw)
     f2_level = Expression('exact_order(np.arange(0, 85, 5), cycles=1)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
@@ -470,10 +469,9 @@ def launch_gui(inear_cal_0, inear_cal_1, mic_cal, **kwargs):
     with tables.open_file('test.hd5', 'w') as fh:
         data = DPOAEData(store_node=fh.root)
         experiment = DPOAEExperiment(data=data, paradigm=DPOAEParadigm())
-        controller = DPOAEController(mic_cal=mic_cal,
-                                     inear_cal_0=inear_cal_0,
-                                     inear_cal_1=inear_cal_1)
+        controller = DPOAEController(mic_cal=mic_cal)
         experiment.edit_traits(handler=controller, **kwargs)
+
 
 def configure_logging(filename):
     time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
