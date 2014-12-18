@@ -1,9 +1,11 @@
 import os.path
+import datetime as dt
+import re
 
 import numpy as np
 import tables
 
-from traits.api import (HasTraits, Property, List, Str, Instance)
+from traits.api import (HasTraits, Property, List, Str, Instance, Date)
 from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
                           Controller)
 from pyface.api import ImageResource
@@ -36,6 +38,7 @@ class ExperimentSetup(HasTraits):
 
     experimenters = Property(List)
     experimenter = Str
+    experiment_note = Str
 
     animals = Property(List)
     animal = Str
@@ -45,7 +48,15 @@ class ExperimentSetup(HasTraits):
 
     mic_cal = Instance('neurogen.calibration.Calibration')
 
-    def _filename():
+    base_filename = Property(depends_on='experimenter, animal, experiment_note')
+
+    def _date_default(self):
+        return dt.date.today()
+
+    def _get_base_filename(self):
+        t = '{{date}}-{{time}} {} {} {} {{experiment}}.hdf5'
+        f = t.format(self.experimenter, self.animal, self.experiment_note)
+        return re.sub(r'\s+', r' ', f)
 
     def _calibrations_default(self):
         return self._update_calibrations()
@@ -57,10 +68,10 @@ class ExperimentSetup(HasTraits):
         return calibrations
 
     def _get_experimenters(self):
-        return ['Test', 'Brad', 'Stephen']
+        return ['Brad', 'Stephen']
 
     def _get_animals(self):
-        return ['Tarragon', 'Dill', 'Parsley']
+        return ['Beowulf', 'Tarragon', 'Dill', 'Parsley']
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
@@ -70,7 +81,9 @@ class ExperimentSetup(HasTraits):
         VGroup(
             Item('experimenter', editor=EnumEditor(name='experimenters')),
             Item('animal', editor=EnumEditor(name='animals')),
+            Item('experiment_note'),
             Item('calibration', editor=EnumEditor(name='calibrations')),
+            Item('base_filename', style='readonly'),
             show_border=True,
         ),
         resizable=True,
