@@ -1,29 +1,24 @@
-from traits.api import (Instance, Float, push_exception_handler, Bool, Property,
-                        cached_property, Int)
+from traits.api import (Instance, Float, push_exception_handler, Bool, Int)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 
 from enable.api import Component, ComponentEditor
 from pyface.api import ImageResource
-from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
-                       OverlayPlotContainer, create_line_plot,  LogMapper,
-                       ArrayPlotData, Plot, HPlotContainer)
+from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
+                       LogMapper, ArrayPlotData, Plot, HPlotContainer)
 
 import numpy as np
-from scipy import signal
 
 from neurogen.util import db
 from neurogen import block_definitions as blocks
 from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
-from cochlear.nidaqmx import (DAQmxDefaults, TriggeredDAQmxSource, DAQmxPlayer,
-                              DAQmxChannel, DAQmxAttenControl)
+from cochlear.nidaqmx import (DAQmxDefaults, DAQmxAttenControl)
 from cochlear import nidaqmx as ni
 from cochlear import tone_calibration as tc
 
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
                         AbstractController, AbstractExperiment)
-from experiment.channel import FileEpochChannel
 from experiment.coroutine import coroutine, blocked, counter
 
 import tables
@@ -34,7 +29,7 @@ icon_dir = [resource_filename('experiment', 'icons')]
 push_exception_handler(reraise_exceptions=True)
 
 DAC_FS = 200e3
-ADC_FS = 100e3
+ADC_FS = 200e3
 
 
 def dpoae_analyze(waveforms, fs, frequencies, mic_cal, window=None):
@@ -68,7 +63,7 @@ class DPOAEData(AbstractData):
     waveform_node = Instance('tables.EArray')
 
     def log_trial(self, waveforms, fs, **kwargs):
-        index = super(DPOAEData, self).log_trial(**kwargs)
+        super(DPOAEData, self).log_trial(**kwargs)
         if self.waveform_node is None:
             shape = [0] + list(waveforms.shape)
             self.waveform_node = self.fh.create_earray(
@@ -81,38 +76,37 @@ class DPOAEParadigm(AbstractParadigm):
 
     kw = dict(context=True, log=True)
 
-    fs = Float(200e3, **kw)
-
     dp_frequency = Expression('f2_frequency-f1_frequency',
                               label='DP frequency (Hz)', **kw)
     dpoae_frequency = Expression('2*f1_frequency-f2_frequency',
                                  label='DPOAE frequency (Hz)', **kw)
-    f1_frequency = Expression('imult(f2_frequency/1.2, 1/response_window)', **kw)
-    f2_frequency = Expression('imult(8e3, 1/response_window)', **kw)
-    f1_level = Expression('f2_level+10', **kw)
-    f2_level = Expression('exact_order(np.arange(0, 85, 5), cycles=1)', **kw)
+    f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
+                              label='f1 frequency (Hz)', **kw)
+    f2_frequency = Expression( 'u(dp(2e3, 32e3, 0.5, probe_duration), level)',
+                              label='f2 frequency (Hz)', **kw)
+    f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
+    f2_level = Expression('exact_order(np.arange(0, 85, 5), cycles=1)',
+                          label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
 
     probe_duration = Expression('response_window+response_offset*2',
                                 label='Probe duration (s)', **kw)
     ramp_duration = Expression(5e-3, label='Ramp duration (s)', **kw)
 
-    response_window = Expression(100e-3, **kw)
-    response_offset = Expression('ramp_duration*4', **kw)
+    response_window = Expression(100e-3, label='Response window (s)', **kw)
+    response_offset = Expression('ramp_duration*4', label='Response offset (s)',
+                                 **kw)
 
-    iti = Expression(0.01, label='Intertrial interval (sec)', **kw)
+    iti = Expression(0.01, label='Intertrial interval (s)', **kw)
     exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', **kw)
 
     # Signal acquisition settings.  Increasing time_averages increases SNR by
     # sqrt(N).  Increasing spectral averages reduces variance of result. 8&4
-    time_averages = Float(4, **kw)
-    spectrum_averages = Float(4, **kw)
-
-    n_stimuli = Property(depends_on='time_averages, spectrum_averages', **kw)
-
-    @cached_property
-    def _get_n_stimuli(self):
-        return self.time_averages*self.spectrum_averages
+    time_averages = Float(4, label='Time averages (decreases noise floor)',
+                          **kw)
+    spectrum_averages = Float(4,
+                              label='Spectrum averages (decreases variability)',
+                              **kw)
 
     traits_view = View(
         VGroup(
@@ -197,8 +191,6 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.log_trial(waveforms=waveforms, fs=self.adc_fs)
 
     def send(self, waveforms):
-        #waveforms = waveforms[:, :, self.offset_samples:]
-        print waveforms.shape
         self.waveforms.append(waveforms)
         self.current_valid_repetitions += len(waveforms)
         self.current_repetitions = self.pipeline.n
@@ -213,12 +205,12 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.refresh_context(evaluate=True)
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
-        f1_sens = tc.tone_calibration(f1_frequency, self.mic_cal, gain=-20,
-                                      max_thd=0.05,
-                                      output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
-        f2_sens = tc.tone_calibration(f2_frequency, self.mic_cal, gain=-20,
-                                      max_thd=0.05,
-                                      output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
+        f1_sens = tc.tone_calibration(
+            f1_frequency, self.mic_cal, gain=-20, max_thd=0.05,
+            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+        f2_sens = tc.tone_calibration(
+            f2_frequency, self.mic_cal, gain=-20, max_thd=0.05,
+            output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
         self.f1_sens = f1_sens
         self.f2_sens = f2_sens
         self.next_trial()
@@ -229,7 +221,6 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         dpoae_frequency = self.get_current_value('dpoae_frequency')
         f1_level = self.get_current_value('f1_level')
         f2_level = self.get_current_value('f2_level')
-        n_stimuli = self.get_current_value('n_stimuli')
         probe_duration = self.get_current_value('probe_duration')
         response_window = self.get_current_value('response_window')
         response_offset = self.get_current_value('response_offset')
@@ -244,7 +235,7 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         # an input gain, it must be negative.
         self.mic_cal.set_fixed_gain(-mic_gain)
 
-        pipeline = counter(
+        pipeline = counter(  # noqa
             blocked(time_averages, 0,
             dpoae_reject(self.adc_fs, dpoae_frequency, self.mic_cal, dpoae_nf,
             self)))
@@ -371,7 +362,8 @@ class DPOAEExperiment(AbstractExperiment):
         w_psd = psd(w, fs, window).mean(axis=0)
 
         container = HPlotContainer(padding=50, spacing=50)
-        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)), color='black')
+        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)),
+                                color='black')
         plot.index_mapper = index_mapper
         axis = PlotAxis(orientation='bottom', component=plot,
                         title='Frequency (Hz)')
@@ -381,7 +373,8 @@ class DPOAEExperiment(AbstractExperiment):
         plot.underlays.append(axis)
         container.add(plot)
 
-        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)), color='black')
+        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)),
+                                color='black')
         index_range = DataRange1D(low_setting=dpoae_frequency/1.1,
                                   high_setting=dpoae_frequency*1.1)
         index_mapper = LogMapper(range=index_range)
@@ -408,7 +401,6 @@ class DPOAEExperiment(AbstractExperiment):
                             )
         self.append_dp_data(f2_level=f2_level)
 
-
     traits_view = View(
         HSplit(
             VGroup(
@@ -432,10 +424,10 @@ class DPOAEExperiment(AbstractExperiment):
                     Item('time_plot', show_label=False,
                          editor=ComponentEditor(width=300, height=300)),
                     Item('dp_plot', show_label=False,
-                        editor=ComponentEditor(width=300, height=300)),
+                         editor=ComponentEditor(width=300, height=300)),
                 ),
                 Item('spectrum_plot', show_label=False,
-                        editor=ComponentEditor(width=300, height=300)),
+                     editor=ComponentEditor(width=300, height=300)),
             )
         ),
         resizable=True,
@@ -475,39 +467,40 @@ def launch_gui(inear_cal_0, inear_cal_1, mic_cal, **kwargs):
                                      inear_cal_1=inear_cal_1)
         experiment.edit_traits(handler=controller, **kwargs)
 
+
 def configure_logging(filename):
     time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
     simple_format = '%(name)s - %(message)s'
 
     logging_config = {
-            'version': 1,
-            'formatters': {
-                'time': { 'format': time_format },
-                'simple': { 'format': simple_format },
+        'version': 1,
+        'formatters': {
+            'time': {'format': time_format},
+            'simple': {'format': simple_format},
+            },
+        'handlers': {
+            # This is what gets printed out to the console
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'simple',
+                'level': 'DEBUG',
                 },
-            'handlers': {
-                # This is what gets printed out to the console
-                'console': {
-                    'class': 'logging.StreamHandler',
-                    'formatter': 'simple',
-                    'level': 'DEBUG',
-                    },
-                # This is what gets saved to the file
-                'file': {
-                    'class': 'logging.FileHandler',
-                    'formatter': 'time',
-                    'filename': filename,
-                    'level': 'DEBUG',
-                    }
-                },
-            'loggers': {
-                'cochlear.tone_calibration': { 'level': 'DEBUG', },
-                'tone_calibration': { 'level': 'DEBUG', },
-                },
-            'root': {
-                'handlers': ['console', 'file'],
-                },
-            }
+            # This is what gets saved to the file
+            'file': {
+                'class': 'logging.FileHandler',
+                'formatter': 'time',
+                'filename': filename,
+                'level': 'DEBUG',
+                }
+            },
+        'loggers': {
+            'cochlear.tone_calibration': {'level': 'DEBUG'},
+            'tone_calibration': {'level': 'DEBUG'},
+            },
+        'root': {
+            'handlers': ['console', 'file'],
+            },
+        }
     logging.config.dictConfig(logging_config)
 
 
