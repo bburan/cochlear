@@ -88,7 +88,7 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    f2_frequency = Expression( 'u(dp(4e3, 32e3, 0.5, probe_duration), f2_level)',
+    f2_frequency = Expression( 'u(dp(4e3, 32e3, 0.5, response_window), f2_level)',
                               label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
     f2_level = Expression('exact_order(np.arange(0, 85, 5), c=1)',
@@ -206,7 +206,6 @@ class DPOAEController(DAQmxDefaults, AbstractController):
             self.get_current_value('ramp_duration'))
         self.save_waveforms(waveforms, **results)
         try:
-            self.refresh_context(evaluate=True)
             self.next_trial()
         except StopIteration:
             # We are done with the experiment
@@ -228,13 +227,17 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.dpoae_pipeline.send(waveforms)
 
     def set_f1_frequency(self, f1_frequency):
-        print 'recalibrating f1'
+        # Allow the calibration to automatically handle the gain.  Since this is
+        # an input gain, it must be negative.
+        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
         self.f1_sens = tc.tone_calibration(
             f1_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
 
     def set_f2_frequency(self, f2_frequency):
-        print 'recalibrating f2'
+        # Allow the calibration to automatically handle the gain.  Since this is
+        # an input gain, it must be negative.
+        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
         self.f2_sens = tc.tone_calibration(
             f2_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
@@ -257,9 +260,6 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         dpoae_nf = self.get_current_value('dpoae_noise_floor')
         mic_gain = self.get_current_value('exp_mic_gain')
 
-        # Allow the calibration to automatically handle the gain.  Since this is
-        # an input gain, it must be negative.
-        self.mic_cal.set_fixed_gain(-mic_gain)
 
         pipeline = counter(  # noqa
             blocked(time_averages, 0,

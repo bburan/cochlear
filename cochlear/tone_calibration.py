@@ -49,16 +49,14 @@ def _to_sens(output_spl, output_gain, vrms):
     return -norm_spl-db(20e-6)
 
 
-def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
-                  input_gain):
-
+def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd):
     nf_rms = np.mean(tone_power_conv(nf_signal, fs, frequency, 'flattop'))
     measured_thd = np.mean(thd(signal, fs, frequency, 3, 'flattop'))
     rms = np.mean(tone_power_conv(signal, fs, frequency, 'flattop'))
     mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.2f}%'
     log.debug(mesg.format(db(nf_rms), db(rms), measured_thd*100))
     _check_calibration(frequency, rms, nf_rms, min_db, measured_thd, max_thd)
-    return db(rms)-input_gain
+    return db(rms)
 
 
 def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
@@ -70,8 +68,8 @@ def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
         raise CalibrationTHDError(m)
 
 
-def tone_power(frequency, gain=0, vrms=1, input_gain=20, repetitions=1,
-               fs=200e3, max_thd=0.1, min_db=10, duration=0.1, trim=0.01,
+def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
+               min_db=10, duration=0.1, trim=0.01,
                output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
                input_line=ni.DAQmxDefaults.MIC_INPUT):
 
@@ -98,8 +96,7 @@ def tone_power(frequency, gain=0, vrms=1, input_gain=20, repetitions=1,
     # Measure the actual output
     c.token = blocks.Tone(frequency=frequency, level=0)
     signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
-    return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd,
-                         input_gain)
+    return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd)
 
 
 def tone_spl(frequency, input_calibration, *args, **kwargs):
@@ -126,7 +123,7 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
 
 
 def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
-                   f1_vrms=1, f2_vrms=1, input_gain=20, repetitions=1, fs=200e3,
+                   f1_vrms=1, f2_vrms=1, repetitions=1, fs=200e3,
                    max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
     '''
     Dual output calibration with each output at a different frequency
@@ -165,10 +162,8 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
     c2.token = blocks.Tone(frequency=f2_frequency, level=0)
     signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
 
-    f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd,
-                       input_gain)
-    f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd,
-                       input_gain)
+    f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd)
+    f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd)
     return f1, f2
 
 
