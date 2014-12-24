@@ -18,7 +18,7 @@ from experiment.coroutine import blocked, rms
 from neurogen.block_definitions import (BandlimitedNoise, Cos2Envelope)
 from neurogen.calibration import InterpCalibration
 from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
-from neurogen.util import db
+from neurogen.util import db, dbtopa
 
 from nidaqmx import (DAQmxDefaults, DAQmxChannel, ContinuousDAQmxPlayer,
                      DAQmxAttenControl, ContinuousDAQmxSource)
@@ -47,7 +47,7 @@ class NoiseExposureParadigm(AbstractParadigm):
                     dtype=np.float, **kw)
     order = Expression(7, label='Filter order', dtype=np.float, **kw)
 
-    level = Expression(80, label='Level (dB SPL)', dtype=np.float, **kw)
+    level = Expression(94, label='Level (dB SPL)', dtype=np.float, **kw)
     seed = Expression(1, label='Noise seed', dtype=np.int, **kw)
     duration = Expression(60, label='Exposure duration (sec)',
                           dtype=np.float, **kw)
@@ -103,25 +103,30 @@ class NoiseExposureController(AbstractController, DAQmxDefaults):
     poll_rate = 1
 
     def setup_experiment(self, info=None):
+        # Set up the speaker output
         calibration = InterpCalibration.as_attenuation()
         token = BandlimitedNoise(name='noise') >> Cos2Envelope(name='envelope')
         channel = DAQmxChannel(token=token, voltage_min=-10, voltage_max=10)
         iface_dac = ContinuousDAQmxPlayer(fs=DAC_FS, done_callback=self.stop)
         iface_dac.add_channel(channel, name='primary')
-        iface_adc = ContinuousDAQmxSource(
-            fs=ADC_FS, pipeline=blocked(int(ADC_FS*self.poll_rate), -1, self),
-            callback_samples=25e3)
+
+        # Set up the mic input
+        adc_pipeline = blocked(int(ADC_FS*self.poll_rate), -1, self)
+        iface_adc = ContinuousDAQmxSource(fs=ADC_FS, pipeline=adc_pipeline,
+                                          callback_samples=25e3)
+
+        # Save the results
         self.channel = channel
         self.iface_adc = iface_adc
         self.iface_dac = iface_dac
         self.token = token
+        super(NoiseExposureController, self).setup_experiment(info)
 
     def send(self, data):
         self.model.update_plots(ADC_FS, data)
         self.model.data.noise_channel.send(data)
 
     def start_experiment(self, info=None):
-        self.register_dtypes()
         self.refresh_context(evaluate=True)
         self.iface_adc.start()
         self.iface_dac.play_continuous()
@@ -168,6 +173,12 @@ class NoiseExposureController(AbstractController, DAQmxDefaults):
     def set_speaker_sens_dbv(self, value):
         self.channel.calibration = InterpCalibration([0, 100e3], [value, value])
 
+    def set_mic_sens(self, value):
+        level = self.get_current_value('level')
+        max_value = dbtopa(level)*value*1e-3
+        max_value_decade = 10**np.ceil(np.log10(max_value*2))*10
+        self.iface_adc.expected_range = max_value_decade
+
 
 class NoiseExposureExperiment(AbstractExperiment):
 
@@ -207,13 +218,12 @@ class NoiseExposureExperiment(AbstractExperiment):
         self.current_time += len(data)/fs
 
         self.current_spl = db_rms
-        self.current_spl_average = self.rms_data.get_data('rms')[-10:].mean()
+        self.current_spl_average = self.rms_data.get_data('rms')[-60:].mean()
         self.overall_spl_average = self.rms_data.get_data('rms').mean()
 
         w_frequency = psd_freq(data, fs)
         w_psd = psd(data, fs, 'boxcar')
         w_psd_db = db(w_psd)-self.paradigm.mic_sens_dbv-db(20e-6)
-
         self.rms_data.update_data(frequency=w_frequency, psd=w_psd_db)
 
     def _rms_data_default(self):
@@ -226,10 +236,7 @@ class NoiseExposureExperiment(AbstractExperiment):
 
     def _overall_rms_plot_default(self):
         plot = Plot(self.rms_data)
-        #plot.index_range.high_setting = 60*60*2
         plot.index_range.low_setting = 0
-        #plot.value_range.low_setting = 70
-        #plot.value_range.high_setting = 110
         plot.plot(('time', 'rms'))
         return plot
 
@@ -238,8 +245,6 @@ class NoiseExposureExperiment(AbstractExperiment):
         plot.index_range.high_setting = 'auto'
         plot.index_range.low_setting = 'track'
         plot.index_range.tracking_amount = 60
-        #plot.value_range.low_setting = 70
-        #plot.value_range.high_setting = 110
         plot.plot(('time', 'rms'))
         return plot
 
@@ -260,7 +265,8 @@ class NoiseExposureExperiment(AbstractExperiment):
                     Item('paradigm', style='custom', show_label=False,
                          width=200),
                     show_border=True,
-                    label='Settings'
+                    label='Settings',
+                    enabled_when="handler.state!='running'",
                 ),
                 VGroup(
                     'current_spl',

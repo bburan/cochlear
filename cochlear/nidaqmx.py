@@ -413,17 +413,21 @@ def num_channels(task):
 ################################################################################
 class DAQmxBase(object):
 
+    # State can be uninitialized, initialized, running
+
     def __init__(self):
         self._tasks = []
-        self._state = 'initialized'
+        self._state = 'uninitialized'
 
     def start(self):
+        if self._state == 'uninitialized':
+            self.setup()
         self._state = 'running'
         for task in self._tasks:
             ni.DAQmxStartTask(task)
 
     def stop(self):
-        self._state = 'halted'
+        self._state = 'initialized'
         for task in self._tasks:
             try:
                 ni.DAQmxStopTask(task)
@@ -439,7 +443,10 @@ class DAQmxBase(object):
                 ni.DAQmxClearTask(task)
             except ni.DAQError:
                 pass
+        self._state = 'uninitialized'
 
+    def setup(self):
+        self._state = 'initialized'
 
 class DAQmxSource(DAQmxBase):
     '''
@@ -472,10 +479,6 @@ class DAQmxSource(DAQmxBase):
     def join(self, timeout=None):
         return self._event.wait(timeout)
 
-    def start(self):
-        self._event.clear()
-        super(DAQmxSource, self).start()
-
 
 class ContinuousDAQmxSource(DAQmxSource):
 
@@ -497,7 +500,6 @@ class ContinuousDAQmxSource(DAQmxSource):
         super(ContinuousDAQmxSource, self).__init__()
         for k, v in locals().items():
             setattr(self, k, v)
-        self.setup()
 
     def setup(self):
         self._task_analog, self._cb_ptr = create_continuous_ai(
@@ -508,6 +510,7 @@ class ContinuousDAQmxSource(DAQmxSource):
         self.channels = num_channels(self._task_analog)
         self._event = threading.Event()
         log.debug('Configured retriggerable AI with %d channels', self.channels)
+        super(ContinuousDAQmxSource, self).setup()
 
     def samples_available(self):
         return samples_available(self._task_analog)
@@ -552,7 +555,6 @@ class TriggeredDAQmxSource(DAQmxSource):
             setattr(self, k, v)
         self.offset = int(trigger_delay * fs)
         self.epoch_size = int(epoch_duration * fs) + self.offset
-        self.setup()
 
     def setup(self):
         self._task_analog, self._task_digital, self._cb_ptr = \
@@ -564,6 +566,7 @@ class TriggeredDAQmxSource(DAQmxSource):
         self.channels = num_channels(self._task_analog)
         self._event = threading.Event()
         log.debug('Configured retriggerable AI with %d channels', self.channels)
+        super(TriggeredDAQmxSource, self).setup()
 
     def read_timer(self):
         result = ctypes.c_uint32()
@@ -643,6 +646,7 @@ class AbstractDAQmxPlayer(DAQmxBase):
                 done_callback=self._done_callback)
         self._tasks.extend((self._task_digital, self._task_analog))
         self.samples_written = 0
+        super(AbstractDAQmxPlayer, self).setup()
 
     def get_write_size(self):
         if self._state == 'halted':
@@ -696,12 +700,6 @@ class AbstractDAQmxPlayer(DAQmxBase):
         if self.attenuator is None:
             raise ValueError('Cannot control attenuation')
         return self.attenuator.get_nearest_atten(atten)
-
-    def _play(self):
-        self.start_time = time.time()
-        self.setup()
-        self.monitor()
-        self.start()
 
     def _done_callback(self):
         if self.done_callback is not None:
@@ -866,22 +864,19 @@ class DAQmxAttenControl(DAQmxBase):
     def setup(self):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
-        #self._lock.acquire()
         self._task_mute = create_task('Mute control')
         self._task_zc = create_task('ZC control')
-
         self._task_com, self._task_clk = \
             self._setup_serial_comm(self.serial_line, self.hw_clock)
 
-        # Set up mute line.  In theory we can combine both of these lines into a
-        # single task, but it's easier to program them separately.
+        # Set up mute and zc lines.  In theory we can combine both of these
+        # lines into a single task, but it's easier to program them separately.
         ni.DAQmxCreateDOChan(self._task_mute, self.mute_line, 'mute',
                              ni.DAQmx_Val_ChanPerLine)
-
-        # Set up zero crossing line
         ni.DAQmxCreateDOChan(self._task_zc, self.zc_line, 'zc',
                              ni.DAQmx_Val_ChanPerLine)
 
+        # TODO: should this be here or moved?
         if self._task_clk is not None:
             ni.DAQmxStartTask(self._task_clk)
 
@@ -889,9 +884,9 @@ class DAQmxAttenControl(DAQmxBase):
         self.set_mute(False)
         self.set_zero_crossing(False)
         self.set_atten(np.inf, np.inf)
-
-        self._tasks.extend((self._task_clk, self._task_zc, self._task_mute,
-                            self._task_com))
+        tasks = self._task_clk, self._task_zc, self._task_mute, self._task_com
+        self._tasks.extend(tasks)
+        super(DAQmxAttenControl, self).setup()
 
     def _gain_to_byte(self, gain):
         '''
