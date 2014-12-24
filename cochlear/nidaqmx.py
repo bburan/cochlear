@@ -415,9 +415,10 @@ class DAQmxBase(object):
 
     # State can be uninitialized, initialized, running
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self._tasks = []
         self._state = 'uninitialized'
+        super(DAQmxBase, self).__init__(*args, **kwargs)
 
     def start(self):
         if self._state == 'uninitialized':
@@ -447,6 +448,7 @@ class DAQmxBase(object):
 
     def setup(self):
         self._state = 'initialized'
+
 
 class DAQmxSource(DAQmxBase):
     '''
@@ -497,9 +499,9 @@ class ContinuousDAQmxSource(DAQmxSource):
         callback : {None, callable}
             TODO
         '''
-        super(ContinuousDAQmxSource, self).__init__()
         for k, v in locals().items():
             setattr(self, k, v)
+        super(ContinuousDAQmxSource, self).__init__()
 
     def setup(self):
         self._task_analog, self._cb_ptr = create_continuous_ai(
@@ -707,17 +709,19 @@ class AbstractDAQmxPlayer(DAQmxBase):
 
 
 class QueuedDAQmxPlayer(AbstractDAQmxPlayer, QueuedPlayer):
+    pass
 
-    def __init__(self, *args, **kwargs):
-        AbstractDAQmxPlayer.__init__(self, *args, **kwargs)
-        QueuedPlayer.__init__(self, *args, **kwargs)
+    #def __init__(self, *args, **kwargs):
+    #    AbstractDAQmxPlayer.__init__(self, *args, **kwargs)
+    #    QueuedPlayer.__init__(self, *args, **kwargs)
 
 
 class ContinuousDAQmxPlayer(AbstractDAQmxPlayer, ContinuousPlayer):
+    pass
 
-    def __init__(self, *args, **kwargs):
-        AbstractDAQmxPlayer.__init__(self, *args, **kwargs)
-        ContinuousPlayer.__init__(self, *args, **kwargs)
+    #def __init__(self, *args, **kwargs):
+    #    AbstractDAQmxPlayer.__init__(self, *args, **kwargs)
+    #    ContinuousPlayer.__init__(self, *args, **kwargs)
 
 
 class DAQmxAttenControl(DAQmxBase):

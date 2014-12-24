@@ -113,7 +113,8 @@ class NoiseExposureController(AbstractController, DAQmxDefaults):
         # Set up the mic input
         adc_pipeline = blocked(int(ADC_FS*self.poll_rate), -1, self)
         iface_adc = ContinuousDAQmxSource(fs=ADC_FS, pipeline=adc_pipeline,
-                                          callback_samples=25e3)
+                                          callback_samples=25e3,
+                                          input_line='/Dev1/ai1')
 
         # Save the results
         self.channel = channel
@@ -222,7 +223,7 @@ class NoiseExposureExperiment(AbstractExperiment):
         self.overall_spl_average = self.rms_data.get_data('rms').mean()
 
         w_frequency = psd_freq(data, fs)
-        w_psd = psd(data, fs, 'boxcar')
+        w_psd = psd(data, fs, 'hamming')
         w_psd_db = db(w_psd)-self.paradigm.mic_sens_dbv-db(20e-6)
         self.rms_data.update_data(frequency=w_frequency, psd=w_psd_db)
 
