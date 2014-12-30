@@ -20,7 +20,7 @@ from cochlear import nidaqmx as ni
 from cochlear import tone_calibration as tc
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
-                        AbstractController, AbstractExperiment)
+                        AbstractController, AbstractExperiment, depends_on)
 from experiment.coroutine import coroutine, blocked, counter
 
 from experiment.plots.epoch_channel_plot import EpochChannelPlot
@@ -50,80 +50,6 @@ def abr_reject(reject_threshold, fs, target):
             target.send(data)
 
 
-@coroutine
-def accumulate(epochs, store):
-    e = 0
-    while True:
-        if e >= epochs:
-            raise GeneratorExit
-        d = (yield)
-        e += 1
-        store.append(d)
-
-
-def acquire_tone(frequency, level, mic_cal, duration=5e-3, ramp_duration=0.5e-3,
-                 **kwargs):
-    speaker_sens = tc.tone_calibration(frequency, mic_cal)
-    token = Tone(frequency=frequency, level=level) >> \
-        Cos2Envelope(rise_time=ramp_duration, duration=duration)
-    return acquire(token, speaker_sens, **kwargs)
-
-
-def acquire(token, speaker_sens, averages=512, repetition_rate=40,
-            epoch_duration=10e-3, reject_threshold=np.inf, fs=25e3,
-            callback=None, sink=None):
-
-    # Pipeline to group acquisitions into pairs of two (i.e. alternate
-    # polarity tone-pips), reject the pair if either exceeds artifact
-    # reject, and accumulate the specified averages.  When the specified
-    # number of averages are acquired, the program exits.
-    waveforms = []
-    pipeline = counter(
-               blocked(2, 0,  #noqa
-               abr_reject(reject_threshold,  #noqa
-               accumulate(averages/2, waveforms))))  #noqa
-
-    # Set up the hardware
-    iface_atten = ni.DAQmxAttenControl()
-    iface_adc = ni.TriggeredDAQmxSource(epoch_duration=epoch_duration,
-                                        input_line=DAQmxDefaults.ERP_INPUT,
-                                        pipeline=pipeline, fs=fs)
-
-    iface_dac = ni.QueuedDAQmxPlayer(
-        output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-        duration=1.0/repetition_rate)
-
-    channel = ni.DAQmxChannel(token=token, calibration=speaker_sens,
-                    attenuator=iface_atten,
-                    attenuator_channel=ni.DAQmxDefaults.PRIMARY_ATTEN_CHANNEL)
-
-    iface_dac.add_channel(channel, name='primary')
-    iface_atten.setup()
-    iface_dac.set_best_attenuations()
-    iface_atten.clear()
-
-    # Set up alternating polarity by shifting the phase np.pi.  Use the
-    # Interleaved FIFO queue for this.
-    iface_dac.queue_init('Interleaved FIFO')
-    iface_dac.queue_append(np.inf, values={'primary.tone.phase': 0})
-    iface_dac.queue_append(np.inf, values={'primary.tone.phase': np.pi})
-
-    # Run until data successfully acquired.  Report status as requested.
-    iface_adc.start()
-    iface_dac.play_queue()
-    while not iface_adc.join(0.25):
-        if callback is not None:
-            total = pipeline.n
-            total_valid = len(waveforms)*2
-            callback(total, total_valid)
-
-    # Cleanup and return
-    iface_dac.stop()
-    iface_adc.stop()
-    if waveforms:
-        return np.concatenate(waveforms)
-
-
 ################################################################################
 # GUI class
 ################################################################################
@@ -135,9 +61,10 @@ class ABRParadigm(AbstractParadigm):
     averages = Expression(512, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
     reject_threshold = Expression(2, dtype=np.float, **kw)
+    exp_mic_gain = Expression(40, dtype=np.float, **kw)
 
     # Stimulus settings
-    repetition_rate = Expression(40, dtype=np.float, **kw)
+    repetition_rate = Expression(20, dtype=np.float, **kw)
     frequency = Expression(8e3, dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
@@ -167,32 +94,56 @@ class ABRParadigm(AbstractParadigm):
                 label='Analysis settings',
                 show_border=True,
             ),
+            VGroup(
+                'exp_mic_gain',
+                label='Hardware settings',
+                show_border=True,
+            ),
         ),
     )
 
 
 class ABRController(AbstractController):
 
-    current_repetitions = Int(0)
-    current_valid_repetitions = Int(0)
+    mic_cal = Instance('neurogen.calibration.Calibration')
+    primary_sens = Instance('neurogen.calibration.PointCalibration')
+    secondary_sens = Instance('neurogen.calibration.PointCalibration')
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
     iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
 
+    primary_spl = Float(label='Primary output @ 1Vrms, 0 dB gain (dB SPL)',
+                        log=True, dtype=np.float32)
+
+    current_valid_repetitions = Int(0)
+    current_repetitions = Int(0)
+
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
-
     done = Bool(False)
-    stop_requested = Bool(False)
+
+    extra_dtypes = [
+        ('primary_sens', np.float32),
+        ('primary_spl', np.float32),
+    ]
+
+    @depends_on('exp_mic_gain')
+    def set_frequency(self, frequency):
+        log.debug('Calibrating primary speaker')
+        self.primary_sens = tc.tone_calibration(
+            frequency, self.mic_cal, gain=-20, max_thd=0.1,
+            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+        self.primary_spl = self.primary_sens.get_spl(frequency, 1)
+
+    def set_exp_mic_gain(self, exp_mic_gain):
+        # Allow the calibration to automatically handle the gain.  Since this is
+        # an input gain, it must be negative.
+        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
 
     def stop_experiment(self, info=None):
-        self.stop_requested = True
-
-    def stop(self, info=None):
         self.iface_dac.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
         self.iface_atten.clear()
-        self.state = 'halted'
         self.model.data.save()
 
     def update_repetitions(self, value):
@@ -210,7 +161,6 @@ class ABRController(AbstractController):
         duration = self.get_current_value('duration')
         ramp_duration = self.get_current_value('ramp_duration')
 
-        speaker_sens = tc.tone_calibration(frequency, self.mic_cal, gain=-20)
         token = Tone(name='tone', frequency=frequency, level=level) >> \
             Cos2Envelope(rise_time=ramp_duration, duration=duration)
 
@@ -243,7 +193,7 @@ class ABRController(AbstractController):
 
         channel = ni.DAQmxChannel(
             token=token,
-            calibration=speaker_sens,
+            calibration=self.primary_sens,
             attenuator=iface_atten,
             attenuator_channel=ni.DAQmxDefaults.PRIMARY_ATTEN_CHANNEL)
 
@@ -284,10 +234,20 @@ class ABRController(AbstractController):
         waveforms = np.concatenate(self.waveforms, axis=0)[:self.to_acquire, 0]
         self.model.update_plots(self.adc_fs, waveforms)
         self.save_waveforms(waveforms)
-        self.next_trial()
+
+        # If user has requested a pause, don't go to the next trial
+        if not self.pause_requested:
+            self.next_trial()
+        else:
+            self.state = 'paused'
 
     def save_waveforms(self, waveforms):
-        self.log_trial(waveforms=waveforms, fs=self.adc_fs)
+        primary_sens = self.primary_sens.get_sens(
+            self.get_current_value('frequency'))
+        self.log_trial(waveforms=waveforms,
+                       primary_sens=primary_sens,
+                       primary_spl=self.primary_spl,
+                       fs=self.adc_fs)
 
 
 class ABRExperiment(AbstractExperiment):
@@ -355,6 +315,8 @@ class ABRExperiment(AbstractExperiment):
                     label='Paradigm',
                 ),
                 VGroup(
+                    Item('handler.primary_spl', style='readonly',
+                         format_str='%0.2f'),
                     Item('handler.current_repetitions', style='readonly',
                          label='Repetitions'),
                     Item('handler.current_valid_repetitions', style='readonly',
@@ -376,29 +338,17 @@ class ABRExperiment(AbstractExperiment):
             '-',  # hack to get below group to appear first
             Action(name='Start', action='start',
                    image=ImageResource('1rightarrow', icon_dir),
-                   enabled_when='handler.inear_cal is not None'),
+                   enabled_when='handler.state=="uninitialized"'),
             Action(name='Stop', action='stop',
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
-            Action(name='Pause', action='pause',
+            Action(name='Pause', action='request_pause',
                    image=ImageResource('player_pause', icon_dir),
-                   enabled_when='handler.state=="running"'),
-            '-',
-            Action(name='Apply', action='apply',
-                   image=ImageResource('system_run', icon_dir),
-                   enabled_when='handler.pending_changes'),
-            Action(name='Revert', action='revert',
-                   image=ImageResource('undo', icon_dir),
-                   enabled_when='handler.pending_changes'),
-        ),
-        menubar=MenuBar(
-            Menu(
-                ActionGroup(
-                    Action(name='Load settings', action='load_settings'),
-                    Action(name='Save settings', action='save_settings'),
-                ),
-                name='&Settings',
-            ),
+                   enabled_when='handler.state=="running" and '
+                                'not handler.pause_requested'),
+            Action(name='Resume', action='resume',
+                   image=ImageResource('player_fwd', icon_dir),
+                   enabled_when='handler.state=="paused"'),
         ),
         id='lbhb.ABRExperiment',
     )
@@ -432,7 +382,7 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
 
-    configure_logging('temp.log')
+    #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     c = InterpCalibration.from_mic_file('c:/data/cochlear/calibration/141112 DPOAE frequency calibration in half-octaves 500 to 32000.mic')
     log.debug('====================== MAIN =======================')

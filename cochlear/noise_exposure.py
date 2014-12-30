@@ -138,7 +138,6 @@ class NoiseExposureController(AbstractController, DAQmxDefaults):
         self.log_trial()
 
     def stop_experiment(self, info=None):
-        self.state = 'halted'
         self.iface_adc.stop()
         self.iface_dac.stop()
 

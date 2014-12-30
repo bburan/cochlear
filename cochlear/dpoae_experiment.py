@@ -20,7 +20,7 @@ from cochlear import tone_calibration as tc
 
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
-                        AbstractController, AbstractExperiment)
+                        AbstractController, AbstractExperiment, depends_on)
 from experiment.coroutine import coroutine, blocked, counter
 from experiment.evaluate import choice, expr
 
@@ -33,8 +33,6 @@ push_exception_handler(reraise_exceptions=True)
 
 DAC_FS = 200e3
 ADC_FS = 200e3
-
-
 
 def dp_freq(start, end, octave_spacing, probe_duration, c=1):
     frequencies = expr.octave_space(start, end, octave_spacing)
@@ -146,20 +144,27 @@ class DPOAEParadigm(AbstractParadigm):
 class DPOAEController(AbstractController):
 
     mic_cal = Instance('neurogen.calibration.Calibration')
-    f1_sens = Instance('neurogen.calibration.PointCalibration')
-    f2_sens = Instance('neurogen.calibration.PointCalibration')
+    primary_sens = Instance('neurogen.calibration.PointCalibration')
+    secondary_sens = Instance('neurogen.calibration.PointCalibration')
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
     iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
 
-    adc_fs = Float(ADC_FS)
-    dac_fs = Float(DAC_FS)
-    done = Bool(False)
-    stop_requested = Bool(False)
-    f2_frequency_changed = Bool(False)
+    primary_spl = Float(label='Primary output @ 1Vrms, 0 dB gain (dB SPL)',
+                        log=True, dtype=np.float32)
+    secondary_spl = Float(label='Secondary output @ 1Vrms, 0 dB gain (dB SPL)',
+                        log=True, dtype=np.float32)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
 
+    adc_fs = Float(ADC_FS)
+    dac_fs = Float(DAC_FS)
+    done = Bool(False)
+
+    f2_frequency_changed = Bool(False)
+
+    # Provide the function, `dp_freq`, to the experiment namespace under the
+    # alias `dp`.
     extra_context = {
         'dp': dp_freq,
     }
@@ -171,26 +176,23 @@ class DPOAEController(AbstractController):
         ('measured_dpoae_spl', np.float32),
         ('measured_dp_nf', np.float32),
         ('measured_dpoae_nf', np.float32),
+        ('primary_sens', np.float32),
+        ('secondary_sens', np.float32),
+        ('primary_spl', np.float32),
+        ('secondary_spl', np.float32),
     ]
 
     def update_repetitions(self, repetitions):
         self.current_repetitions = repetitions
 
-    def get_dtypes(self):
-        return self.extra_dtypes
-
     def stop_experiment(self, info=None):
-        self.stop_requested = True
-
-    def stop(self, info=None):
         self.iface_dac.clear()
         self.iface_adc.clear()
         self.iface_atten.clear()
-        self.state = 'halted'
         self.model.data.save()
 
     def trial_complete(self):
-        self.iface_dac.play_stop()
+        self.iface_dac.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
         waveforms = np.concatenate(self.waveforms, axis=0)[:self.to_acquire, 0]
@@ -210,15 +212,24 @@ class DPOAEController(AbstractController):
             self.mic_cal,
             self.get_current_value('ramp_duration'))
         self.save_waveforms(waveforms, **results)
-        try:
+
+        if not self.pause_requested:
             self.next_trial()
-        except StopIteration:
-            # We are done with the experiment
-            self.stop()
-            return
+        else:
+            self.state = 'paused'
 
     def save_waveforms(self, waveforms, **results):
-        self.log_trial(waveforms=waveforms, fs=self.adc_fs, **results)
+        primary_sens = self.primary_sens.get_sens(
+            self.get_current_value('f1_frequency'))
+        secondary_sens = self.secondary_sens.get_sens(
+            self.get_current_value('f2_frequency'))
+        self.log_trial(waveforms=waveforms,
+                       fs=self.adc_fs,
+                       primary_sens=primary_sens,
+                       secondary_sens=secondary_sens,
+                       primary_spl=self.primary_spl,
+                       secondary_spl=self.secondary_spl,
+                       **results)
 
     def send(self, waveforms):
         self.waveforms.append(waveforms)
@@ -227,36 +238,36 @@ class DPOAEController(AbstractController):
         if self.current_valid_repetitions >= self.to_acquire:
             raise GeneratorExit
 
-    def poll(self):
-        waveforms = self.iface_adc.read_analog()[0]
-        self.dpoae_pipeline.send(waveforms)
-
-
     def set_exp_mic_gain(self, exp_mic_gain):
         # Allow the calibration to automatically handle the gain.  Since this is
         # an input gain, it must be negative.
         self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
 
+    @depends_on('exp_mic_gain')
     def set_f1_frequency(self, f1_frequency):
-        # ensure that exp_mic_gain is properly set first
         log.debug('Calibrating primary speaker')
-        self.get_current_value('exp_mic_gain')
-        self.f1_sens = tc.tone_calibration(
+        self.primary_sens = tc.tone_calibration(
             f1_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+        self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
+    @depends_on('exp_mic_gain')
     def set_f2_frequency(self, f2_frequency):
-        # ensure that exp_mic_gain is properly set first
         log.debug('Calibrating secondary speaker')
-        self.get_current_value('exp_mic_gain')
-        self.f2_sens = tc.tone_calibration(
+        self.secondary_sens = tc.tone_calibration(
             f2_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
+        self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
     def next_trial(self):
-        log.debug('Preparing next trial')
-        self.refresh_context(evaluate=True)
+        try:
+            log.debug('Preparing next trial')
+            self.refresh_context(evaluate=True)
+        except StopIteration:
+            self.stop()
+            return
+
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
         dpoae_frequency = self.get_current_value('dpoae_frequency')
@@ -290,14 +301,14 @@ class DPOAEController(AbstractController):
             blocks.Cos2Envelope(duration=probe_duration,
                                 rise_time=ramp_duration) >> \
             ni.DAQmxChannel(
-                calibration=self.f1_sens, attenuator=self.iface_atten,
+                calibration=self.primary_sens, attenuator=self.iface_atten,
                 attenuator_channel=ni.DAQmxDefaults.AO0_ATTEN_CHANNEL)
 
         c2 = blocks.Tone(frequency=f2_frequency, level=f2_level, name='f2') >> \
             blocks.Cos2Envelope(duration=probe_duration,
                                 rise_time=ramp_duration) >> \
             ni.DAQmxChannel(
-                calibration=self.f2_sens, attenuator=self.iface_atten,
+                calibration=self.secondary_sens, attenuator=self.iface_atten,
                 attenuator_channel=ni.DAQmxDefaults.AO1_ATTEN_CHANNEL)
 
         self.iface_dac = ni.QueuedDAQmxPlayer(
@@ -481,13 +492,22 @@ class DPOAEExperiment(AbstractExperiment):
                     Include('context_group'),
                     label='Paradigm',
                 ),
-                VGroup(
-                    Item('handler.current_repetitions', style='readonly',
-                         label='Repetitions'),
-                    Item('handler.current_valid_repetitions', style='readonly',
-                         label='Valid repetitions')
+                HGroup(
+                    VGroup(
+                        Item('handler.current_repetitions', style='readonly',
+                            label='Repetitions'),
+                        Item('handler.current_valid_repetitions',
+                             style='readonly', label='Valid repetitions'),
+                        show_border=True,
+                    ),
+                    VGroup(
+                        Item('handler.primary_spl', style='readonly',
+                             format_str='%0.2f'),
+                        Item('handler.secondary_spl', style='readonly',
+                             format_str='%0.2f'),
+                        show_border=True,
+                    ),
                 ),
-                show_border=True,
             ),
             VGroup(
                 HGroup(
@@ -507,24 +527,19 @@ class DPOAEExperiment(AbstractExperiment):
             '-',  # hack to get below group to appear first
             Action(name='Start', action='start',
                    image=ImageResource('1rightarrow', icon_dir),
-                   enabled_when='handler.inear_cal is not None'),
+                   enabled_when='handler.state=="uninitialized"'),
             Action(name='Stop', action='stop',
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
-            Action(name='Pause', action='pause',
+            Action(name='Pause', action='request_pause',
                    image=ImageResource('player_pause', icon_dir),
-                   enabled_when='handler.state=="running"'),
+                   enabled_when='handler.state=="running" and '
+                                'not handler.pause_requested'),
+            Action(name='Resume', action='resume',
+                   image=ImageResource('player_fwd', icon_dir),
+                   enabled_when='handler.state=="paused"'),
         ),
-        menubar=MenuBar(
-            Menu(
-                ActionGroup(
-                    Action(name='Load settings', action='load_settings'),
-                    Action(name='Save settings', action='save_settings'),
-                ),
-                name='&Settings',
-            ),
-        ),
-        id='lbhb.ABRExperiment',
+        id='lbhb.DPOAEExperiment',
     )
 
 
@@ -542,7 +557,7 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
 
-    configure_logging('temp.log')
+    #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     c = InterpCalibration.from_mic_file('c:/data/cochlear/calibration/141112 DPOAE frequency calibration in half-octaves 500 to 32000.mic')
     log.debug('====================== MAIN =======================')

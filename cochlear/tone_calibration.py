@@ -35,6 +35,7 @@ from neurogen.calibration.util import (analyze_mic_sens, analyze_tone,
                                        tone_power_conv, psd, psd_freq, thd)
 
 import settings
+from cochlear import calibration_standard as reference_calibration
 
 ################################################################################
 # Utility tone calibration functions
@@ -269,44 +270,6 @@ def ceiling_spl(frequency, max_spl=80, initial_gain=-40, vrms=1, spl_step=5,
 # Calibration GUI
 ################################################################################
 
-class SpeakerToneCalibrationResult(HasTraits):
-
-    frequency = Float(save=True)
-    time = Array(save=True)
-    freq_psd = Array(save=True)
-    mic_rms = Float(save=True)
-    mic_psd = Array(save=True)
-    thd = Float(save=True)
-    mic_waveform = Array(save=True)
-    output_spl = Float(save=True)
-    norm_output_spl = Float(save=True)
-    speaker_sens = Float(save=True)
-    waveforms = Array(save=True)
-
-    harmonics = List()
-
-    waveform_plots = Instance(Component)
-    spectrum_plots = Instance(Component)
-    harmonic_plots = Instance(Component)
-
-    traits_view = View(
-        VGroup(
-            HGroup(
-                'mic_rms',
-                Item('thd', label='THD (frac)'),
-            ),
-            'output_spl',
-            VGroup(
-                Item('waveform_plots', editor=ComponentEditor(size=(600, 250))),
-                Item('spectrum_plots', editor=ComponentEditor(size=(600, 250))),
-                Item('harmonic_plots', editor=ComponentEditor(size=(600, 250))),
-                show_labels=False,
-            ),
-            style='readonly',
-        )
-    )
-
-
 class MicToneCalibrationResult(HasTraits):
 
     frequency = Float(save=True)
@@ -478,6 +441,10 @@ class BaseToneCalibrationController(Controller):
     def cancel_calibration(self, info):
         self.calibration_accepted = False
         info.ui.dispose()
+
+    def run_reference_calibration(self, info):
+        reference_calibration.launch_gui(parent=info.ui.control,
+                                         kind='livemodal')
 
 
 class BaseToneCalibration(HasTraits):
@@ -653,7 +620,7 @@ class MicToneCalibration(BaseToneCalibration):
             'ref_mic_sens',
             Item('ref_mic_sens_dbv', style='readonly', label='V (dB re Pa)'),
         ),
-        label='Mecrophone settings',
+        label='Microphone settings',
         show_border=True,
     )
 
@@ -675,52 +642,6 @@ class MicToneCalibration(BaseToneCalibration):
             Action(name='Save', action='save',
                    image=ImageResource('document_save', icon_dir),
                    enabled_when='handler.acquired')
-        ),
-        resizable=True,
-        height=0.95,
-        width=0.5,
-        id='cochlear.ToneMicCal',
-    )
-
-
-class SpeakerToneCalibration(BaseToneCalibration):
-
-    def _get_inputs(self):
-        return self.exp_input
-
-    tone_data = List(Instance(SpeakerToneCalibrationResult), ())
-    measured_f1 = List(save=True)
-    measured_f2 = List(save=True)
-    measured_f3 = List(save=True)
-    measured_thd = List(save=True)
-    speaker_sens = List(save=True)
-
-    mic_settings = VGroup(
-        HGroup(
-            Item('exp_input'),
-            Item('exp_mic_gain', label='Gain (dB)'),
-        ),
-        label='Microphone settings',
-        show_border=True,
-    )
-
-    traits_view = View(
-        Include('configuration'),
-        toolbar=ToolBar(
-            '-',
-            Action(name='Start', action='start',
-                   image=ImageResource('1rightarrow', icon_dir),
-                   enabled_when='not handler.running'),
-            Action(name='Stop', action='stop',
-                   image=ImageResource('Stop', icon_dir),
-                   enabled_when='handler.running'),
-            '-',
-            Action(name='Accept', action='accept_calibration',
-                   image=ImageResource('dialog_ok_apply', icon_dir),
-                   enabled_when='handler.acquired'),
-            Action(name='Cancel', action='cancel_calibration',
-                   image=ImageResource('dialog_cancel', icon_dir),
-                   enabled_when='handler.acquired'),
         ),
         resizable=True,
         height=0.95,
@@ -863,128 +784,9 @@ class MicToneCalibrationController(BaseToneCalibrationController):
         self.model.spl_plots = container
 
 
-class SpeakerToneCalibrationController(BaseToneCalibrationController):
-
-    mic_cal = Instance('neurogen.calibration.Calibration')
-
-    def analyze(self, waveforms):
-        result = analyze_tone(
-            waveforms=waveforms[:, 0, :],
-            frequency=self.current_frequency,
-            waveform_averages=self.model.waveform_averages,
-            fft_averages=self.model.fft_averages,
-            fs=self.model.fs,
-            mic_gain=self.model.exp_mic_gain,
-            trim=self.model.trim)
-        mic_rms = dbi(result['mic_rms'])
-        output_spl = self.mic_cal.get_spl(self.current_frequency, mic_rms)
-        norm_output_spl = output_spl-self.model.output_gain-db(self.model.vrms)
-        speaker_sens = -(norm_output_spl+db(20e-6))
-        result.update({
-            'output_spl': output_spl,
-            'norm_output_spl': norm_output_spl,
-            'speaker_sens': speaker_sens
-        })
-        return result
-
-    def update_plots(self, results):
-        result = SpeakerToneCalibrationResult(**results)
-        frequency = results['frequency']
-
-        ds = ArrayPlotData(freq_psd=results['freq_psd'],
-                           mic_psd=results['mic_psd'],
-                           time=results['time'],
-                           mic_waveform=results['mic_waveform'])
-
-        # Set up the waveform plot
-        plot = Plot(ds)
-        plot.plot(('time', 'mic_waveform'), color='black')
-        plot.index_range.high_setting = 5.0/frequency
-        result.waveform_plots = plot
-
-        # Set up the spectrum plot
-        plot = Plot(ds)
-        plot.plot(('freq_psd', 'mic_psd'), color='black')
-        plot.index_scale = 'log'
-        plot.title = 'Microphone response'
-        plot.padding = 50
-        plot.index_range.low_setting = 100
-        result.spectrum_plots = plot
-
-        # Plot the fundamental (i.e. the tone) and first even/odd harmonics
-        harmonic_container = HPlotContainer(resizable='hv', bgcolor='white',
-                                            fill_padding=True, padding=10)
-        for i in range(3):
-            f_harmonic = results['harmonics'][i]['frequency']
-            plot = Plot(ds)
-            plot.plot(('freq_psd', 'mic_psd'), color='black')
-            plot.index_range.low_setting = f_harmonic-500
-            plot.index_range.high_setting = f_harmonic+500
-            plot.origin_axis_visible = True
-            plot.padding_left = 10
-            plot.padding_right = 10
-            plot.border_visible = True
-            plot.title = 'F{}'.format(i+1)
-            harmonic_container.add(plot)
-        result.harmonic_plots = harmonic_container
-
-        self.model.tone_data.append(result)
-
-        # Update the master overview
-        self.model.measured_freq.append(results['frequency'])
-        self.model.measured_spl.append(results['output_spl'])
-        self.model.speaker_sens.append(results['speaker_sens'])
-        for h in range(3):
-            v = results['harmonics'][h]['mic_rms']
-            name = 'measured_f{}'.format(h+1)
-            getattr(self.model, name).append(v)
-        v = results['thd']
-        getattr(self.model, 'measured_thd').append(v)
-
-        ds = ArrayPlotData(
-            frequency=self.model.measured_freq,
-            spl=self.model.measured_spl,
-            measured_thd=self.model.measured_thd,
-            speaker_sens=self.model.speaker_sens,
-        )
-
-        container = VPlotContainer(padding=10, bgcolor='white',
-                                   fill_padding=True, resizable='hv')
-        plot = Plot(ds)
-        plot.plot(('frequency', 'spl'), color='black')
-        plot.plot(('frequency', 'spl'), color='black', type='scatter')
-        plot.index_scale = 'log'
-        plot.title = 'Speaker output (dB SPL)'
-        container.add(plot)
-
-        plot = Plot(ds)
-        plot.plot(('frequency', 'measured_thd'), color='black')
-        plot.plot(('frequency', 'measured_thd'), color='black', type='scatter')
-        plot.index_scale = 'log'
-        plot.title = 'Total harmonic distortion (frac)'
-        container.add(plot)
-
-        plot = Plot(ds)
-        plot.plot(('frequency', 'speaker_sens'), color='red')
-        plot.plot(('frequency', 'speaker_sens'), color='red', type='scatter')
-        plot.index_scale = 'log'
-        plot.title = 'Speaker sensitivity V (dB re Pa)'
-        container.add(plot)
-        self.model.spl_plots = container
-
-
 def launch_mic_cal_gui(**kwargs):
     handler = MicToneCalibrationController()
     MicToneCalibration().edit_traits(handler=handler, **kwargs)
-
-
-def launch_speaker_cal_gui(output, mic_cal, **kwargs):
-    handler = SpeakerToneCalibrationController(mic_cal=mic_cal)
-    model = SpeakerToneCalibration()
-    model.edit_traits(handler=handler, **kwargs)
-    if not handler.calibration_accepted:
-        return None
-    return InterpCalibration(model.frequency, model.speaker_sens)
 
 
 if __name__ == '__main__':

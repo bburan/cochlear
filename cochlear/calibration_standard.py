@@ -1,4 +1,5 @@
 import numpy as np
+import tables
 
 from traits.api import (HasTraits, Instance, Float, Enum, Int, Property,
                         cached_property, Any)
@@ -74,15 +75,12 @@ class StandardCalController(DAQmxDefaults, AbstractController):
         self.iface_adc.setup()
         self.iface_adc.start()
 
-    def stop(self, info=None):
-        self.state = 'halted'
+    def stop_experiment(self, info=None):
         self.iface_adc.clear()
         self.complete = True
 
-    def poll(self):
-        waveform = self.iface_adc.read_analog(timeout=0)
+    def poll(self, waveform):
         self.model.data.channel.send(waveform)
-        print waveform.shape
         self.samples_acquired += int(waveform.shape[-1])
         if self.samples_acquired >= self.target_samples:
             self.model.generate_plots()
@@ -193,8 +191,8 @@ class StandardCal(HasTraits):
 
 
 def launch_gui(**kwargs):
-    import tables
     with tables.open_file('dummy', 'w', driver='H5FD_CORE',
                           core_backing_store=0) as fh:
         data = StandardCalData(store_node=fh.root)
-        StandardCal(data=data).configure_traits(handler=StandardCalController())
+        handler = StandardCalController()
+        StandardCal(data=data).edit_traits(handler=handler, **kwargs)

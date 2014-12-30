@@ -21,7 +21,7 @@ from cochlear import dpoae_experiment
 
 class ExperimentController(Controller):
 
-    def run_microphone_calibration(self, info):
+    def run_microphone_calibrataion(self, info):
         cal.launch_mic_cal_gui(parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
@@ -35,7 +35,6 @@ class ExperimentController(Controller):
 
     def run_abr_experiment(self, info):
         filename = self._get_filename(info, 'ABR')
-        print filename
         abr_experiment.launch_gui(info.object.mic_cal, filename=filename,
                                   parent=info.ui.control, kind='livemodal')
 
@@ -73,7 +72,7 @@ class ExperimentSetup(HasTraits):
         return self._update_calibrations()
 
     def _update_calibrations(self):
-        calibrations = settings.list_mic_calibrations()
+        calibrations = settings.list_mic_cal()
         calibrations = [os.path.basename(c) for c in calibrations]
         self.calibration = calibrations[0]
         return calibrations
