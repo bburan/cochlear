@@ -1,5 +1,8 @@
 from __future__ import division
 
+import logging
+log = logging.getLogger(__name__)
+
 import numpy as np
 from scipy import signal
 
@@ -20,8 +23,9 @@ from neurogen.calibration import InterpCalibration
 from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
 from neurogen.util import db, dbtopa
 
-from nidaqmx import (DAQmxDefaults, DAQmxChannel, ContinuousDAQmxPlayer,
-                     DAQmxAttenControl, ContinuousDAQmxSource)
+from cochlear.nidaqmx import (DAQmxDefaults, DAQmxChannel,
+                              ContinuousDAQmxPlayer, DAQmxAttenControl,
+                              ContinuousDAQmxSource)
 
 DAC_FS = 100e3
 ADC_FS = 100e3
@@ -104,9 +108,9 @@ class NoiseExposureController(AbstractController, DAQmxDefaults):
 
     def setup_experiment(self, info=None):
         # Set up the speaker output
-        calibration = InterpCalibration.as_attenuation()
         token = BandlimitedNoise(name='noise') >> Cos2Envelope(name='envelope')
-        channel = DAQmxChannel(token=token, voltage_min=-10, voltage_max=10)
+        channel = DAQmxChannel(calibration=InterpCalibration.as_attenuation(),
+                               token=token, voltage_min=-10, voltage_max=10)
         iface_dac = ContinuousDAQmxPlayer(fs=DAC_FS, done_callback=self.stop)
         iface_dac.add_channel(channel, name='primary')
 
@@ -300,41 +304,81 @@ class NoiseExposureExperiment(AbstractExperiment):
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
         ),
-        menubar=MenuBar(
-            Menu(
-                ActionGroup(
-                    Action(name='Load settings', action='load_settings'),
-                    Action(name='Save settings', action='save_settings'),
-                ),
-                name='&Settings',
-            ),
-            Menu(
-                ActionGroup(
-                    Action(name='Load calibration', action='load_calibration'),
-                ),
-                ActionGroup(
-                    Action(name='Calibrate reference microphone',
-                           action='calibrate_reference_microphone'),
-                    Action(name='Calibrate microphone',
-                           action='calibrate_microphone'),
-                    Action(name='Calibrate speaker',
-                           action='calibrate_speaker'),
-                ),
-                name='&Calibration'
-            ),
+        #menubar=MenuBar(
+        #    Menu(
+        #        ActionGroup(
+        #            Action(name='Load settings', action='load_settings'),
+        #            Action(name='Save settings', action='save_settings'),
+        #        ),
+        #        name='&Settings',
+        #    ),
+        #    Menu(
+        #        ActionGroup(
+        #            Action(name='Load calibration', action='load_calibration'),
+        #        ),
+        #        ActionGroup(
+        #            Action(name='Calibrate reference microphone',
+        #                   action='calibrate_reference_microphone'),
+        #            Action(name='Calibrate microphone',
+        #                   action='calibrate_microphone'),
+        #            Action(name='Calibrate speaker',
+        #                   action='calibrate_speaker'),
+        #        ),
+        #        name='&Calibration'
+        #    ),
 
-        ),
+        #),
         width=0.5,
         height=0.5,
         id='lbhb.NoiseExposureExperiment',
     )
 
 
+def configure_logging(filename):
+    time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
+    simple_format = '%(name)s - %(message)s'
+
+    logging_config = {
+        'version': 1,
+        'formatters': {
+            'time': {'format': time_format},
+            'simple': {'format': simple_format},
+            },
+        'handlers': {
+            # This is what gets printed out to the console
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'simple',
+                'level': 'DEBUG',
+                },
+            # This is what gets saved to the file
+            'file': {
+                'class': 'logging.FileHandler',
+                'formatter': 'time',
+                'filename': filename,
+                'level': 'DEBUG',
+                }
+            },
+        'loggers': {
+            '__main__': {'level': 'DEBUG'},
+            'cochlear': {'level': 'DEBUG'},
+            'cochlear.nidaqmx': {'level': 'DEBUG'},
+            },
+        'root': {
+            'handlers': ['console', 'file'],
+            },
+        }
+    logging.config.dictConfig(logging_config)
+
+
 if __name__ == '__main__':
-    import PyDAQmx as ni
+    import logging.config
+    import PyDAQmx as pyni
     import warnings
     import tables
-    ni.DAQmxResetDevice('Dev1')
+    pyni.DAQmxResetDevice('Dev1')
+    configure_logging('temp.log')
+    log.debug('====================== MAIN =======================')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         with tables.open_file('temp.hdf5', 'w') as fh:

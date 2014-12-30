@@ -1,3 +1,6 @@
+import logging
+log = logging.getLogger(__name__)
+
 from traits.api import (Instance, Float, push_exception_handler, Bool, Int)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
@@ -12,7 +15,6 @@ import numpy as np
 from neurogen.util import db
 from neurogen import block_definitions as blocks
 from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
-from cochlear.nidaqmx import (DAQmxDefaults, DAQmxAttenControl)
 from cochlear import nidaqmx as ni
 from cochlear import tone_calibration as tc
 
@@ -141,13 +143,13 @@ class DPOAEParadigm(AbstractParadigm):
     )
 
 
-class DPOAEController(DAQmxDefaults, AbstractController):
+class DPOAEController(AbstractController):
 
     mic_cal = Instance('neurogen.calibration.Calibration')
     f1_sens = Instance('neurogen.calibration.PointCalibration')
     f2_sens = Instance('neurogen.calibration.PointCalibration')
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
-    iface_dac = Instance('cochlear.nidaqmx.DAQmxPlayer')
+    iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
 
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
@@ -170,6 +172,9 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         ('measured_dp_nf', np.float32),
         ('measured_dpoae_nf', np.float32),
     ]
+
+    def update_repetitions(self, repetitions):
+        self.current_repetitions = repetitions
 
     def get_dtypes(self):
         return self.extra_dtypes
@@ -226,24 +231,31 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         waveforms = self.iface_adc.read_analog()[0]
         self.dpoae_pipeline.send(waveforms)
 
-    def set_f1_frequency(self, f1_frequency):
+
+    def set_exp_mic_gain(self, exp_mic_gain):
         # Allow the calibration to automatically handle the gain.  Since this is
         # an input gain, it must be negative.
         self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
+
+    def set_f1_frequency(self, f1_frequency):
+        # ensure that exp_mic_gain is properly set first
+        log.debug('Calibrating primary speaker')
+        self.get_current_value('exp_mic_gain')
         self.f1_sens = tc.tone_calibration(
             f1_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
 
     def set_f2_frequency(self, f2_frequency):
-        # Allow the calibration to automatically handle the gain.  Since this is
-        # an input gain, it must be negative.
-        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
+        # ensure that exp_mic_gain is properly set first
+        log.debug('Calibrating secondary speaker')
+        self.get_current_value('exp_mic_gain')
         self.f2_sens = tc.tone_calibration(
             f2_frequency, self.mic_cal, gain=-20, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
         self.f2_frequency_changed = True
 
     def next_trial(self):
+        log.debug('Preparing next trial')
         self.refresh_context(evaluate=True)
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
@@ -260,8 +272,7 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         dpoae_nf = self.get_current_value('dpoae_noise_floor')
         mic_gain = self.get_current_value('exp_mic_gain')
 
-
-        pipeline = counter(  # noqa
+        pipeline = counter(self.update_repetitions,  # noqa
             blocked(time_averages, 0,
             dpoae_reject(self.adc_fs, dpoae_frequency, self.mic_cal, dpoae_nf,
             self)))
@@ -273,27 +284,27 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.to_acquire = spectrum_averages*time_averages
         self.offset_samples = int(response_offset*self.adc_fs)
 
-        self.iface_atten = DAQmxAttenControl()
+        self.iface_atten = ni.DAQmxAttenControl()
 
         c1 = blocks.Tone(frequency=f1_frequency, level=f1_level, name='f1') >> \
             blocks.Cos2Envelope(duration=probe_duration,
                                 rise_time=ramp_duration) >> \
-            ni.DAQmxChannel(calibration=self.f1_sens,
-                            attenuator=self.iface_atten,
-                            attenuator_channel=DAQmxDefaults.AO0_ATTEN_CHANNEL)
+            ni.DAQmxChannel(
+                calibration=self.f1_sens, attenuator=self.iface_atten,
+                attenuator_channel=ni.DAQmxDefaults.AO0_ATTEN_CHANNEL)
 
         c2 = blocks.Tone(frequency=f2_frequency, level=f2_level, name='f2') >> \
             blocks.Cos2Envelope(duration=probe_duration,
                                 rise_time=ramp_duration) >> \
-            ni.DAQmxChannel(calibration=self.f2_sens,
-                            attenuator=self.iface_atten,
-                            attenuator_channel=DAQmxDefaults.AO1_ATTEN_CHANNEL)
+            ni.DAQmxChannel(
+                calibration=self.f2_sens, attenuator=self.iface_atten,
+                attenuator_channel=ni.DAQmxDefaults.AO1_ATTEN_CHANNEL)
 
-        self.iface_dac = ni.DAQmxPlayer(
-            output_line=DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
+        self.iface_dac = ni.QueuedDAQmxPlayer(
+            output_line=ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
             duration=probe_duration+iti, fs=self.dac_fs)
         self.iface_adc = ni.TriggeredDAQmxSource(
-            input_line=DAQmxDefaults.MIC_INPUT,
+            input_line=ni.DAQmxDefaults.MIC_INPUT,
             fs=self.adc_fs,
             epoch_duration=response_window,
             trigger_delay=response_offset,
@@ -306,6 +317,7 @@ class DPOAEController(DAQmxDefaults, AbstractController):
         self.iface_dac.add_channel(c1, name='primary')
         self.iface_dac.add_channel(c2, name='secondary')
 
+        log.debug('Setting hardware attenuation')
         self.iface_atten.setup()
         self.iface_dac.set_best_attenuations()
         self.iface_atten.clear()
@@ -323,7 +335,9 @@ class DPOAEController(DAQmxDefaults, AbstractController):
                 self.stop()
                 return
 
+        log.debug('Starting ADC acquisition')
         self.iface_adc.start()
+        log.debug('Starting DAC playout')
         self.iface_dac.play_queue()
 
 
@@ -523,49 +537,15 @@ def launch_gui(mic_cal, filename, **kwargs):
         experiment.edit_traits(handler=controller, **kwargs)
 
 
-def configure_logging(filename):
-    time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
-    simple_format = '%(name)s - %(message)s'
-
-    logging_config = {
-        'version': 1,
-        'formatters': {
-            'time': {'format': time_format},
-            'simple': {'format': simple_format},
-            },
-        'handlers': {
-            # This is what gets printed out to the console
-            'console': {
-                'class': 'logging.StreamHandler',
-                'formatter': 'simple',
-                'level': 'DEBUG',
-                },
-            # This is what gets saved to the file
-            'file': {
-                'class': 'logging.FileHandler',
-                'formatter': 'time',
-                'filename': filename,
-                'level': 'DEBUG',
-                }
-            },
-        'loggers': {
-            'cochlear.tone_calibration': {'level': 'DEBUG'},
-            'tone_calibration': {'level': 'DEBUG'},
-            },
-        'root': {
-            'handlers': ['console', 'file'],
-            },
-        }
-    logging.config.dictConfig(logging_config)
-
-
 if __name__ == '__main__':
-    import logging.config
-    configure_logging('temp.log')
-    import PyDAQmx as pyni
-    pyni.DAQmxResetDevice('Dev1')
+    from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
+    import PyDAQmx as pyni
+
+    configure_logging('temp.log')
+    pyni.DAQmxResetDevice('Dev1')
     c = InterpCalibration.from_mic_file('c:/data/cochlear/calibration/141112 DPOAE frequency calibration in half-octaves 500 to 32000.mic')
+    log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = DPOAEData(store_node=fh.root)
         experiment = DPOAEExperiment(paradigm=DPOAEParadigm(), data=data)
