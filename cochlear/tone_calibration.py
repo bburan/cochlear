@@ -11,7 +11,7 @@ import tables
 import pyfftw
 
 from traits.api import (HasTraits, Float, Int, Property, Enum, Bool, Instance,
-                        Str, List, Array)
+                        Str, List, Array, cached_property)
 from traitsui.api import (Item, VGroup, View, Include, ToolBar, Action,
                           Controller, HSplit, HGroup, ListStrEditor, Tabbed,
                           ListEditor)
@@ -41,8 +41,9 @@ from cochlear import calibration_standard as reference_calibration
 # Utility tone calibration functions
 ################################################################################
 
-thd_err_mesg = 'Total harmonic distortion for {:0.1f}Hz is {:0.3}'
+thd_err_mesg = 'Total harmonic distortion for {:0.1f}Hz is {:0.2f}%'
 nf_err_mesg = 'Power at {:0.1f}Hz of {:0.1f}dB near noise floor of {:0.1f}dB'
+
 
 def _to_sens(output_spl, output_gain, vrms):
     # Convert SPL to value expected at 0 dB gain and 1 VRMS
@@ -51,13 +52,18 @@ def _to_sens(output_spl, output_gain, vrms):
 
 
 def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd):
-    nf_rms = np.mean(tone_power_conv(nf_signal, fs, frequency, 'flattop'))
-    measured_thd = np.mean(thd(signal, fs, frequency, 3, 'flattop'))
-    rms = np.mean(tone_power_conv(signal, fs, frequency, 'flattop'))
-    mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.2f}%'
-    log.debug(mesg.format(db(nf_rms), db(rms), measured_thd*100))
-    _check_calibration(frequency, rms, nf_rms, min_db, measured_thd, max_thd)
-    return db(rms)
+    nf_rms = tone_power_conv(nf_signal, fs, frequency, 'flattop')
+    nf_rms_average = np.mean(nf_rms, axis=0)
+    measured_thd = thd(signal, fs, frequency, 3, 'flattop')
+    measured_thd_average = np.mean(measured_thd, axis=0)
+    rms = tone_power_conv(signal, fs, frequency, 'flattop')
+    rms_average = np.mean(rms, axis=0)
+
+    for n, s, t in zip(nf_rms_average, rms_average, measured_thd_average):
+        mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.2f}%'
+        log.debug(mesg.format(db(n), db(s), t*100))
+        _check_calibration(frequency, s, n, min_db, t, max_thd)
+    return rms_average
 
 
 def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
@@ -65,7 +71,7 @@ def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
         m = nf_err_mesg.format(frequency, db(rms), db(nf_rms))
         raise CalibrationNFError(m)
     if thd > max_thd:
-        m = thd_err_mesg.format(frequency, thd)
+        m = thd_err_mesg.format(frequency, thd*100)
         raise CalibrationTHDError(m)
 
 
@@ -92,17 +98,18 @@ def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
 
     # Measure the noise floor
     c.token = blocks.Silence()
-    nf_signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+    nf_signal = ni.acquire(**daq_kw)
+    nf_signal = nf_signal[:, :, trim_n:-trim_n]
 
     # Measure the actual output
     c.token = blocks.Tone(frequency=frequency, level=0)
-    signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+    signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
     return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd)
 
 
 def tone_spl(frequency, input_calibration, *args, **kwargs):
-    rms = tone_power(frequency, *args, **kwargs)
-    return input_calibration.get_spl(frequency, dbi(rms))
+    rms = tone_power(frequency, *args, **kwargs)[0]
+    return input_calibration.get_spl(frequency, rms)
 
 
 def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
@@ -122,6 +129,15 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
     output_sens = _to_sens(output_spl, gain, vrms)
     return PointCalibration(frequency, output_sens)
 
+
+def tone_calibration_search(frequency, input_calibration, gains, vrms=1, *args,
+                            **kwargs):
+    for gain in gains:
+        try:
+            return tone_calibration(frequency, input_calibration, gain, vrms,
+                                    *args, **kwargs)
+        except CalibrationError:
+            pass
 
 def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
                    f1_vrms=1, f2_vrms=1, repetitions=1, fs=200e3,
@@ -180,8 +196,8 @@ def two_tone_spl(f1_frequency, f2_frequency, input_calibration, *args,
         of each other).
     '''
     f1_rms, f2_rms = two_tone_power(f1_frequency, f2_frequency, *args, **kwargs)
-    f1_spl = input_calibration.get_spl(f1_frequency, dbi(f1_rms))
-    f2_spl = input_calibration.get_spl(f1_frequency, dbi(f2_rms))
+    f1_spl = input_calibration.get_spl(f1_frequency, f1_rms)
+    f2_spl = input_calibration.get_spl(f1_frequency, f2_rms)
     return f1_spl, f2_spl
 
 
@@ -264,6 +280,28 @@ def ceiling_spl(frequency, max_spl=80, initial_gain=-40, vrms=1, spl_step=5,
     mesg ='Maximum output at {:.1f}Hz is {:.1f}dB SPL'
     log.debug(mesg.format(frequency, ceiling_spl))
     return ceiling_spl
+
+
+def mic_sens(frequency, ref_input, exp_input, ref_calibration, *args, **kwargs):
+    '''
+    Compute sensitivity of experiment microphone (e.g. probe tube microphone)
+    based on the reference microphone and sensitivity for the reference
+    microphone.
+
+    Parameters
+    ----------
+    frequency : float (Hz)
+        Frequency to calibrate at
+    ref_input : str
+        niDAQmx input channel for reference microphone
+    exp_input : str
+        niDAQmx input channel for experiment microphone
+    '''
+    mic_input = ','.join((ref_input, exp_input))
+    ref_power, exp_power = tone_power(frequency, *args, input_line=mic_input,
+                                      **kwargs)
+    ref_sens = ref_calibration.get_sens()
+    return db(exp_power)+db(ref_power)-db(ref_sens)
 
 
 ################################################################################
@@ -351,25 +389,22 @@ class BaseToneCalibrationController(Controller):
         self.running = True
         self.acquired = False
         self.epochs_acquired = 0
+
         calibration = InterpCalibration.as_attenuation(vrms=self.model.vrms)
-        waveform = blocks.Tone(frequency=self.current_frequency, level=0)
+        token = blocks.Tone(frequency=self.current_frequency, level=0)
+        channel = ni.DAQmxChannel(calibration=calibration, token=token)
         epochs = self.model.waveform_averages*self.model.fft_averages
-        samples = int(self.model.duration*self.model.fs)
-        buffer_shape = (epochs, 2, samples)
-        if (self.waveform_buffer) is None or \
-                (self.waveform_buffer.shape != buffer_shape):
-            self.waveform_buffer = pyfftw.n_byte_align_empty(buffer_shape, 16,
-                                                             dtype=np.float32)
-        self.iface_daq = ni.DAQmxAcquire([(self.model.output, waveform)],
+
+        self.iface_daq = ni.DAQmxAcquire([channel],
                                          epochs,
-                                         self.model.inputs,
-                                         self.current_gain,
-                                         calibration=calibration,
-                                         callback=self.update_status,
-                                         duration=self.model.duration,
-                                         adc_fs=self.model.fs,
+                                         output_line=self.model.output,
+                                         input_line=self.model.inputs,
+                                         gain=self.current_gain,
                                          dac_fs=self.model.fs,
-                                         waveform_buffer=self.waveform_buffer)
+                                         adc_fs=self.model.fs,
+                                         duration=self.model.duration,
+                                         callback=self.update_status,
+                                         )
 
     def next_frequency(self):
         if self.frequencies:
@@ -465,17 +500,20 @@ class BaseToneCalibration(HasTraits):
     iti = Float(0.001, label='Inter-tone interval', save=True)
     trim = Float(0.001, label='Trim onset (sec)', save=True)
 
-    start_octave = Float(-1, label='Start octave', save=True)
+    start_octave = Float(-2, label='Start octave', save=True)
     start_frequency = Property(depends_on='start_octave', label='End octave', save=True)
-    end_octave = Float(5, save=True)
+    end_octave = Float(6, save=True)
     end_frequency = Property(depends_on='end_octave', save=True)
     octave_spacing = Float(0.25, label='Octave spacing', save=True)
 
     include_dpoae = Bool(True)
+    dpoae_window = Float(100e-3, label='DPOAE analysis window')
 
     frequency = Property(depends_on='start_octave, end_octave, octave_spacing, include_dpoae', save=True)
 
+    @cached_property
     def _get_frequency(self):
+        from experiment.evaluate.expr import imul
         octaves = np.arange(self.start_octave,
                             self.end_octave+self.octave_spacing,
                             self.octave_spacing, dtype=np.float)
@@ -483,10 +521,11 @@ class BaseToneCalibration(HasTraits):
         if self.include_dpoae:
             f2 = frequencies
             f1 = f2/1.2
-            dpoae = 2*f2-f1
+            dpoae = 2*f1-f2
             frequencies = np.concatenate((f2, f1, dpoae))
             frequencies.sort()
-        return frequencies
+            frequencies = imul(frequencies, 1/self.dpoae_window)
+        return np.unique(frequencies)
 
     def _get_start_frequency(self):
         return (2**self.start_octave)*1e3
@@ -494,7 +533,7 @@ class BaseToneCalibration(HasTraits):
     def _get_end_frequency(self):
         return (2**self.end_octave)*1e3
 
-    vpp = Float(10, label='Tone amplitude (peak to peak)')
+    vpp = Float(1, label='Tone amplitude (peak to peak)')
     vrms = Property(depends_on='vpp', label='Tone amplitude (rms)')
     duration = Float(0.04096, label='Tone duration (Hz)')
 
@@ -584,7 +623,7 @@ class MicToneCalibration(BaseToneCalibration):
                      label='Ref. mic. (channel)', save=True)
 
     ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', save=True)
-    ref_mic_sens = Float(2.66, label='Ref. mic. sens (mV/Pa)', save=True)
+    ref_mic_sens = Float(2.685, label='Ref. mic. sens (mV/Pa)', save=True)
     ref_mic_sens_dbv = Property(depends_on='ref_mic_sens', save=True,
                                 label='Ref. mic. sens. V (dB re Pa)')
 
@@ -790,5 +829,39 @@ def launch_mic_cal_gui(**kwargs):
 
 
 if __name__ == '__main__':
-    handler = MicToneCalibrationController()
-    MicToneCalibration().configure_traits(handler=handler)
+    #handler = MicToneCalibrationController()
+    #MicToneCalibration().configure_traits(handler=handler)
+
+    # Verify calibration
+    mic_sens_dbv = db(2.685*1e-3)
+    ref_cal = InterpCalibration([0, 100e3], [mic_sens_dbv, mic_sens_dbv])
+    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    exp_cal = InterpCalibration.from_mic_file(mic_file, fixed_gain=-40)
+    #for freq in (500, 1000, 2000, 4000, 8000, 16000):
+    #    ref = tone_spl(freq, ref_cal, input_line='/Dev1/ai0',
+    #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
+    #    exp = tone_spl(freq, exp_cal, input_line='/Dev1/ai1',
+    #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
+    #    print ref, exp
+
+    ref = tone_spl(3330, ref_cal, input_line='/Dev1/ai0',
+                output_line='/Dev1/ao0', vrms=1, gain=-20)
+    exp = tone_spl(3330, exp_cal, input_line='/Dev1/ai1',
+                output_line='/Dev1/ao0', vrms=1, gain=-20)
+    print ref+20, exp+20
+
+    #import PyDAQmx as pyni
+    #pyni.DAQmxResetDevice('Dev1')
+    #ref = db(ref)
+    #exp = db(exp)+18.5-20
+    #print 'ref', ref
+    #print 'exp', exp
+    #print exp+mic_sens_dbv-ref
+
+    ##ref = tone_power(6e3, input_line='/Dev1/ai0', output_line='/Dev1/ao1', gain=0)
+    ##exp = tone_power(6e3, input_line='/Dev1/ai1', output_line='/Dev1/ao1', gain=-10)
+    ##ref = db(ref)
+    ##exp = db(exp)+10-20
+    ##print exp+mic_sens_dbv-ref
+    ###print mic_sens(4e3, '/Dev1/ai0', '/Dev1/ai1', calibration, repetitions=4,
+    ###               gain=-20, vrms=1)

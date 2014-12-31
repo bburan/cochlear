@@ -69,7 +69,7 @@ class ABRParadigm(AbstractParadigm):
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
     level = Expression(
-        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 80], c=1)',
+        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90], c=1)',
         dtype=np.float, **kw)
 
     traits_view = View(
@@ -126,18 +126,20 @@ class ABRController(AbstractController):
         ('primary_spl', np.float32),
     ]
 
+    search_gains = [-20, -40, 0]
+
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
         log.debug('Calibrating primary speaker')
-        self.primary_sens = tc.tone_calibration(
-            frequency, self.mic_cal, gain=-20, max_thd=0.1,
+        self.primary_sens = tc.tone_calibration_search(
+            frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)
 
     def set_exp_mic_gain(self, exp_mic_gain):
         # Allow the calibration to automatically handle the gain.  Since this is
         # an input gain, it must be negative.
-        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
+        self.mic_cal.set_fixed_gain(-exp_mic_gain)
 
     def stop_experiment(self, info=None):
         self.iface_dac.stop()
@@ -244,10 +246,8 @@ class ABRController(AbstractController):
     def save_waveforms(self, waveforms):
         primary_sens = self.primary_sens.get_sens(
             self.get_current_value('frequency'))
-        self.log_trial(waveforms=waveforms,
-                       primary_sens=primary_sens,
-                       primary_spl=self.primary_spl,
-                       fs=self.adc_fs)
+        self.log_trial(waveforms=waveforms, primary_sens=primary_sens,
+                       primary_spl=self.primary_spl, fs=self.adc_fs)
 
 
 class ABRExperiment(AbstractExperiment):
@@ -384,7 +384,8 @@ if __name__ == '__main__':
 
     #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
-    c = InterpCalibration.from_mic_file('c:/data/cochlear/calibration/141112 DPOAE frequency calibration in half-octaves 500 to 32000.mic')
+    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    c = InterpCalibration.from_mic_file(mic_file)
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = ABRData(store_node=fh.root)

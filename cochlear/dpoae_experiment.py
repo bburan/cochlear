@@ -88,12 +88,12 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    f2_frequency = Expression( 'u(dp(4e3, 32e3, 0.5, response_window), f2_level)',
+    f2_frequency = Expression( 'u(dp(1e3, 32e3, 1, response_window), f2_level)',
                               label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(0, 85, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(10, 95, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
-    dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
+    dpoae_noise_floor = Expression(10, label='DPOAE noise floor (dB SPL)', **kw)
 
     probe_duration = Expression('response_window+response_offset*2',
                                 label='Probe duration (s)', **kw)
@@ -104,14 +104,13 @@ class DPOAEParadigm(AbstractParadigm):
                                  **kw)
 
     iti = Expression(0.01, label='Intertrial interval (s)', **kw)
-    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', **kw)
+    exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
 
     # Signal acquisition settings.  Increasing time_averages increases SNR by
-    # sqrt(N).  Increasing spectral averages reduces variance of result. 8&4
-    time_averages = Float(4, label='Time avg. (decr. noise floor)',
-                          **kw)
-    spectrum_averages = Float(4,
-                              label='Spectrum avg. (decr. variability)',
+    # sqrt(N).  Increasing spectral averages reduces variance of result.  EPL
+    # uses 8&4.
+    time_averages = Float(8, label='Time avg. (decr. noise floor)', **kw)
+    spectrum_averages = Float(4, label='Spectrum avg. (decr. variability)',
                               **kw)
 
     traits_view = View(
@@ -182,6 +181,8 @@ class DPOAEController(AbstractController):
         ('secondary_spl', np.float32),
     ]
 
+    search_gains = [-20, -40, 0]
+
     def update_repetitions(self, repetitions):
         self.current_repetitions = repetitions
 
@@ -195,11 +196,12 @@ class DPOAEController(AbstractController):
         self.iface_dac.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
-        waveforms = np.concatenate(self.waveforms, axis=0)[:self.to_acquire, 0]
         if self.f2_frequency_changed:
             self.model.clear_dp_data()
             self.f2_frequency_changed = False
 
+        waveforms = np.concatenate(self.waveforms, axis=0)
+        waveforms = waveforms[:self.to_acquire, 0]
         results = self.model.update_plots(
             self.adc_fs,
             waveforms,
@@ -213,6 +215,15 @@ class DPOAEController(AbstractController):
             self.get_current_value('ramp_duration'))
         self.save_waveforms(waveforms, **results)
 
+        if not self.pause_requested:
+            self.next_trial()
+        else:
+            self.state = 'paused'
+
+    def next_parameter(self, info=None):
+        self.iface_dac.stop()
+        self.iface_dac.clear()
+        self.iface_adc.clear()
         if not self.pause_requested:
             self.next_trial()
         else:
@@ -240,22 +251,23 @@ class DPOAEController(AbstractController):
 
     def set_exp_mic_gain(self, exp_mic_gain):
         # Allow the calibration to automatically handle the gain.  Since this is
-        # an input gain, it must be negative.
-        self.mic_cal.set_fixed_gain(-self.get_current_value('exp_mic_gain'))
+        # an input gain, it must be negative (meaning that the actual measured
+        # value is less).
+        self.mic_cal.set_fixed_gain(-exp_mic_gain)
 
     @depends_on('exp_mic_gain')
     def set_f1_frequency(self, f1_frequency):
         log.debug('Calibrating primary speaker')
-        self.primary_sens = tc.tone_calibration(
-            f1_frequency, self.mic_cal, gain=-20, max_thd=0.1,
+        self.primary_sens = tc.tone_calibration_search(
+            f1_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
     @depends_on('exp_mic_gain')
     def set_f2_frequency(self, f2_frequency):
         log.debug('Calibrating secondary speaker')
-        self.secondary_sens = tc.tone_calibration(
-            f2_frequency, self.mic_cal, gain=-20, max_thd=0.1,
+        self.secondary_sens = tc.tone_calibration_search(
+            f2_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
@@ -531,6 +543,7 @@ class DPOAEExperiment(AbstractExperiment):
             Action(name='Stop', action='stop',
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
+            '-',
             Action(name='Pause', action='request_pause',
                    image=ImageResource('player_pause', icon_dir),
                    enabled_when='handler.state=="running" and '
@@ -538,6 +551,10 @@ class DPOAEExperiment(AbstractExperiment):
             Action(name='Resume', action='resume',
                    image=ImageResource('player_fwd', icon_dir),
                    enabled_when='handler.state=="paused"'),
+            '-',
+            Action(name='Skip', action='next_parameter',
+                   image=ImageResource('media_skip_forward', icon_dir),
+                   enabled_when='handler.state=="running"'),
         ),
         id='lbhb.DPOAEExperiment',
     )
@@ -559,7 +576,9 @@ if __name__ == '__main__':
 
     #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
-    c = InterpCalibration.from_mic_file('c:/data/cochlear/calibration/141112 DPOAE frequency calibration in half-octaves 500 to 32000.mic')
+    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    c = InterpCalibration.from_mic_file(mic_file)
+
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = DPOAEData(store_node=fh.root)

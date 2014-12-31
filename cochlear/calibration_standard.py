@@ -13,17 +13,10 @@ from nidaqmx import DAQmxDefaults, ContinuousDAQmxSource
 from experiment import (AbstractController, icon_dir, AbstractData,
                         AbstractParadigm, AbstractData)
 from neurogen.util import db, dbtopa
+from neurogen.calibration.util import psd_freq, psd, rms, tone_power_conv
 from experiment.channel import FileChannel
 
 ADC_FS = 200e3
-
-
-class StandardCalData(AbstractData):
-
-    channel = Instance('experiment.channel.Channel')
-
-    def _channel_default(self):
-        return FileChannel(fs=ADC_FS, node=self.store_node, name='temp')
 
 
 class StandardCalSettings(AbstractParadigm):
@@ -34,7 +27,6 @@ class StandardCalSettings(AbstractParadigm):
                  **kw)
     frequency = Float(1000, label='Standard frequency (Hz)', **kw)
     level = Float(114, label='Standard level (dB SPL)', **kw)
-    nom_sens = Float(2.0, label='Nom. sens. (mV/Pa)', **kw)
 
     traits_view = View(
         VGroup(
@@ -71,7 +63,7 @@ class StandardCalController(DAQmxDefaults, AbstractController):
                                                expected_range=10)
         self.samples_acquired = 0
         self.target_samples = int(duration*self.adc_fs)
-        self.model.data.channel.clear()
+        self.waveforms = []
         self.iface_adc.setup()
         self.iface_adc.start()
 
@@ -80,11 +72,15 @@ class StandardCalController(DAQmxDefaults, AbstractController):
         self.complete = True
 
     def poll(self, waveform):
-        self.model.data.channel.send(waveform)
+        self.waveforms.append(waveform)
         self.samples_acquired += int(waveform.shape[-1])
         if self.samples_acquired >= self.target_samples:
-            self.model.generate_plots()
             self.stop()
+            waveforms = np.concatenate(self.waveforms, axis=-1)
+            self.model.generate_plots(waveforms.ravel(),
+                                      self.adc_fs,
+                                      self.get_current_value('frequency'),
+                                      self.get_current_value('level'))
 
 
 class StandardCal(HasTraits):
@@ -97,35 +93,33 @@ class StandardCal(HasTraits):
     rms = Float(0, label='Overall RMS (mV)')
     peak_freq = Float(0, label='Actual freq. (Hz)')
     rms_freq = Float(0, label='RMS at nom. freq. (mV)')
+    mic_sens = Float(0, label='Mic. sens. at nom. freq. (mV/Pa)')
     rms_peak_freq = Float(0, label='RMS at actual freq. (mV)')
-    mic_sens = Float(0, label='Mic. sens. (mV/Pa)')
+    mic_sens_peak_freq = Float(0, label='Mic. sens. at actual freq. (mV/Pa)')
 
-    def generate_plots(self):
+    def generate_plots(self, waveform, fs, frequency, level):
         container = VPlotContainer(padding=70, spacing=70)
 
-        frequency = self.paradigm.frequency
-        level = self.paradigm.level
         pa = dbtopa(level)
 
-        self.rms = 1e3*self.data.channel.get_rms(detrend=True)
-        self.rms_freq = 1e3*self.data.channel.get_magnitude(frequency, rms=True,
-                                                            window='flattop')
+        self.rms = 1e3*rms(waveform, detrend=True)
+        self.rms_freq = 1e3*tone_power_conv(waveform, fs, frequency, 'flattop')
 
-        frequencies = self.data.channel.get_fftfreq()
-        psd_hanning = self.data.channel.get_psd(rms=True, window='hanning')
-        psd_flattop = self.data.channel.get_psd(rms=True, window='flattop')
+        frequencies = psd_freq(waveform, fs)
+        psd_hanning = psd(waveform, fs, 'hanning')
+        psd_flattop = psd(waveform, fs, 'flattop')
 
         freq_lb, freq_ub = frequency*0.9, frequency*1.1
         mask = (frequencies >= freq_lb) & (frequencies < freq_ub)
         self.peak_freq = frequencies[mask][np.argmax(psd_hanning[mask])]
-        self.rms_peak_freq = \
-            1e3*self.data.channel.get_magnitude(self.peak_freq, rms=True,
-                                                window='flattop')
-        self.mic_sens = self.rms_peak_freq/pa
+        self.rms_peak_freq = 1e3*tone_power_conv(waveform, fs, self.peak_freq,
+                                                 'flattop')
+        self.mic_sens_peak_freq = self.rms_peak_freq/pa
+        self.mic_sens = self.rms_freq/pa
 
-        plot = create_line_plot((self.data.channel.time,
-                                 self.data.channel[:]*1e3),
-                                color='black')
+        time = np.arange(len(waveform))/fs
+
+        plot = create_line_plot((time, waveform*1e3), color='black')
         axis = PlotAxis(component=plot, orientation='left',
                         title="Mic. signal (mV)")
         plot.underlays.append(axis)
@@ -170,6 +164,7 @@ class StandardCal(HasTraits):
                 Item('rms_freq', style='readonly'),
                 Item('rms_peak_freq', style='readonly'),
                 Item('mic_sens', style='readonly'),
+                Item('mic_sens_peak_freq', style='readonly'),
                 VGroup(
                     Item('component', editor=ComponentEditor(),
                          show_label=False),
@@ -191,8 +186,5 @@ class StandardCal(HasTraits):
 
 
 def launch_gui(**kwargs):
-    with tables.open_file('dummy', 'w', driver='H5FD_CORE',
-                          core_backing_store=0) as fh:
-        data = StandardCalData(store_node=fh.root)
         handler = StandardCalController()
-        StandardCal(data=data).edit_traits(handler=handler, **kwargs)
+        StandardCal().edit_traits(handler=handler, **kwargs)
