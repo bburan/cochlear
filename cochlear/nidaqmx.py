@@ -58,12 +58,11 @@ class DAQmxDefaults(object):
     AI_FS = 200e3
     AO_FS = 200e3
 
-    VOLUME_CLK = '/{}/port0/line4'.format(DEV)
-    VOLUME_CS = '/{}/port0/line1'.format(DEV)
-    VOLUME_SDI = '/{}/port0/line6'.format(DEV)
-    VOLUME_MUTE = '/{}/port1/line6'.format(DEV)
-    VOLUME_ZC = '/{}/port1/line5'.format(DEV)
-    DIO_CLOCK = '/{}/FreqOut'.format(DEV)
+    VOLUME_MUTE = '/{}/port1/line0'.format(DEV)
+    VOLUME_ZC = '/{}/port1/line1'.format(DEV)
+    VOLUME_CLK = '/{}/port1/line2'.format(DEV)
+    VOLUME_CS = '/{}/port1/line3'.format(DEV)
+    VOLUME_SDI = '/{}/port1/line4'.format(DEV)
 
     TRIGGER_DURATION = 1e-3
 
@@ -456,6 +455,18 @@ class DAQmxBase(object):
         log.debug('Setting up %s', self)
         self._state = 'initialized'
 
+    def __del__(self):
+        if self._state != 'uninitialized':
+            self.clear()
+
+    def __enter__(self):
+        self.setup()
+        self.start()
+        return self
+
+    def __exit__(self):
+        self.__del__()
+
 
 class DAQmxSource(DAQmxBase):
     '''
@@ -751,10 +762,7 @@ class DAQmxAttenControl(DAQmxBase):
     serial control of a programmable IC chip
     '''
     # Gain control settings in dB.  This is IC specific.  Maximum volume is
-    # +31.5 dB; however, I prefer not to use the gain stage since it makes it
-    # difficult to calculate the maximum allowable voltage output from the NI
-    # DAC (the NI DAC can provide sufficient output to cover the full range of
-    # the BUF634 when the volume control is set to 0 dB).
+    # +31.5 dB.
     VOLUME_STEP = 0.5
     VOLUME_MAX = 31.5
     VOLUME_MIN = -96
@@ -764,47 +772,25 @@ class DAQmxAttenControl(DAQmxBase):
     MIN_ATTEN = -VOLUME_MAX
     ATTEN_STEP = VOLUME_STEP
 
-    # This is limited by the input characteristics of the IC (right now the
-    # chip needs at least 90us from the time the chip select line goes low to
-    # reading the first sample from the serial input.  In addition, it needs a
-    # 20us set-up time for reading the next sample (i.e. the clock line must
-    # not go high until 20us after the sample line goes high, and then it must
-    # hold the sample line high for at least 20us).  This places an upper bound
-    # of 10e6 on the clock frequency.  However, a more reasonable upper bound
-    # is probably 1e6 (1GHz).  Minimum frequency is 6250 (100 kHz timebase/16).
-    VOLUME_CLOCK_FREQ = 1e4
-
-    # Each bit is represented by two samples in the buffer to allow the serial
-    # clock to transition while the serial data line is held constant at the
-    # control value.  Two additional bits are added (one at the beginning and
-    # end of the signal) to bring the chip select line back to high.
-    # Samp     1   2   3
-    # Value    1   0   1
-    # P0.0  1 0 0 0 0 0 0 1 - IC reads serial data when 0
-    # P0.1  0 0 1 0 1 0 1 1 - IC reads a bit from P0.2 when 0 -> 1
-    # P0.2  0 1 1 0 0 1 1 0 - Hold value at 0 or 1 when P0.1 0 -> 1
-    VOLUME_BUFFER = VOLUME_BITS * 4 + 2
-
     fs = 200e3
 
     def __init__(self,
-                 clock_line=DAQmxDefaults.VOLUME_CLK,
+                 clk_line=DAQmxDefaults.VOLUME_CLK,
                  cs_line=DAQmxDefaults.VOLUME_CS,
-                 data_line=DAQmxDefaults.VOLUME_SDI,
+                 sdi_line=DAQmxDefaults.VOLUME_SDI,
                  mute_line=DAQmxDefaults.VOLUME_MUTE,
                  zc_line=DAQmxDefaults.VOLUME_ZC,
-                 hw_clock=DAQmxDefaults.DIO_CLOCK,
                  ):
         '''
         Parameters
         ----------
-        clock_line : str
+        clk_line : str
             Line to use for serial clock (rising edge of clock tells IC to read
             the state of the data line)
         cs_line : str
             Line to use for chip select (low value indicates that data is being
             written).
-        data_line : str
+        sdi_line : str
             Line to use for serial data.
         mute_line : str
             Line to use for controlling mute state.  IC is muted when line is
@@ -813,105 +799,49 @@ class DAQmxAttenControl(DAQmxBase):
             Line to use for controlling zero crossing state.  When high, IC
             will change attenuation only when a zero crossing of the signal
             occurs.
-        hw_clock : str
-            Hardware clock to use for controlling hardware-timed write of the
-            serial lines (clock, cs, and data).  Important because the serial
-            lines have very precise timing requirements.
         '''
-        # Can be set to '/Dev1/FreqOut' or '/Dev1/CtrN' where N is a counter
-        # number.  If we are using another sample clock (e.g. ao or ai), then
-        # this will not be configured.
-        self.serial_line = (cs_line, clock_line, data_line)
-        self.mute_line = mute_line
-        self.zc_line = zc_line
-        self.hw_clock = hw_clock
+        for k, v in locals().items():
+            setattr(self, k, v)
         self._right_setting = None
         self._left_setting = None
         super(DAQmxAttenControl, self).__init__()
-
-    def _setup_serial_timer(self, timer):
-        # Configure timing of digital output using a counter that runs at twice
-        # the frequency of the sample clock (enables us to set the value of the
-        # serial data line high or low one cycle before setting the serial
-        # clock high.  Here, the serial clock basically runs at half the rate
-        # of the sample clock.
-        task = create_task('COM timer')
-        ni.DAQmxCreateCOPulseChanFreq(task, timer, '', ni.DAQmx_Val_Hz,
-                                      ni.DAQmx_Val_Low, 0,
-                                      self.VOLUME_CLOCK_FREQ, 0.5)
-        ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
-        return task
-
-    def _setup_serial_comm(self, volume_lines, timer=None):
-        task = create_task('Serial COM')
-        # Configure the task to send serial data to the PGA2311 (stereo audio
-        # volume control).  This output should be fed into pin 6 (SCLK), P0.0
-        # is chip select (CS) input.  The IC will only accept data when CS is
-        # low.  P0.1 is the serial clock (feed into pin 6 of the IC, SCLK).
-        # P0.2 is the serial data (16 bytes, MSB first, first 8 are right
-        # attenuation, second 8 are left attenuation).
-        ni.DAQmxCreateDOChan(task, ', '.join(volume_lines), '',
-                             ni.DAQmx_Val_ChanPerLine)
-
-        # Ensure that chip select line starts high to prevent writing to the
-        # chip.  This needs to be done before configuring the implicit timing
-        # or we'll get an error.
-        initial = np.array([1, 0, 0], dtype=np.uint8)
-        result = ctypes.c_int32()
-        ni.DAQmxWriteDigitalLines(task, 1, True, -1,
-                                  ni.DAQmx_Val_GroupByChannel, initial, result,
-                                  None)
-        ni.DAQmxWaitUntilTaskDone(task, -1)
-
-        # Determine the internal timer to use for implicit timing
-        if timer is not None:
-            # If timer is not SampleClock, we need to set it up.
-            if not timer.endswith('SampleClock'):
-                task_clk = self._setup_serial_timer(timer)
-            else:
-                task_clk = None
-            if timer.endswith('SampleClock'):
-                internal_clock = timer
-            elif timer.endswith('FreqOut'):
-                internal_clock = '/Dev1/FrequencyOutput'
-            else:
-                internal_clock = timer + 'InternalOutput'
-            ni.DAQmxCfgSampClkTiming(task, internal_clock, self.fs,
-                                     ni.DAQmx_Val_Rising,
-                                     ni.DAQmx_Val_FiniteSamps,
-                                     self.VOLUME_BUFFER)
-        else:
-            task_clk = None
-
-        ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
-        return task, task_clk
 
     def setup(self):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
         self._task_mute = create_task('Mute control')
         self._task_zc = create_task('ZC control')
-        self._task_com, self._task_clk = \
-            self._setup_serial_comm(self.serial_line, self.hw_clock)
+        self._task_clk = create_task('Serial CLK')
+        self._task_cs = create_task('Serial CS')
+        self._task_sdi = create_task('Serial SDI')
 
-        # Set up mute and zc lines.  In theory we can combine both of these
+        # Set up digital output lines.  In theory we can combine both of these
         # lines into a single task, but it's easier to program them separately.
         ni.DAQmxCreateDOChan(self._task_mute, self.mute_line, 'mute',
                              ni.DAQmx_Val_ChanPerLine)
         ni.DAQmxCreateDOChan(self._task_zc, self.zc_line, 'zc',
                              ni.DAQmx_Val_ChanPerLine)
-
-        # TODO: should this be here or moved?
-        if self._task_clk is not None:
-            ni.DAQmxStartTask(self._task_clk)
+        ni.DAQmxCreateDOChan(self._task_clk, self.clk_line, 'clk',
+                             ni.DAQmx_Val_ChanPerLine)
+        ni.DAQmxCreateDOChan(self._task_cs, self.cs_line, 'cs',
+                             ni.DAQmx_Val_ChanPerLine)
+        ni.DAQmxCreateDOChan(self._task_sdi, self.sdi_line, 'sdi',
+                             ni.DAQmx_Val_ChanPerLine)
 
         # Use the soft mute option
         self.set_mute(False)
         self.set_zero_crossing(False)
         self.set_atten(np.inf, np.inf)
-        tasks = self._task_clk, self._task_zc, self._task_mute, self._task_com
-        self._tasks.extend(tasks)
+        #self._tasks.extend((self._task_zc, self._task_mute, self._task_clk,
+        #                    self._task_cs, self._task_sdi))
         super(DAQmxAttenControl, self).setup()
+
+    def start(self):
+        super(DAQmxAttenControl, self).start()
+        self._send_bit(self._task_cs, 1)
+        self.set_mute(False)
+        self.set_zero_crossing(False)
+        self.set_atten(np.inf, np.inf)
 
     def _gain_to_byte(self, gain):
         '''
@@ -955,32 +885,20 @@ class DAQmxAttenControl(DAQmxBase):
         word = (rbyte << 8) | lbyte
         return get_bits(word, self.VOLUME_BITS, 'big-endian')
 
-    def _build_com_signal(self, bits):
-        samples_per_bit = 4
-        samples = self.VOLUME_BITS*samples_per_bit
-        line_csi = np.zeros(samples, dtype=np.uint8)  # chip select line
-        line_clk = np.zeros(samples, dtype=np.uint8)  # sample clock line
-        line_sdi = np.zeros(samples, dtype=np.uint8)  # sample data line
-        line_clk[1::samples_per_bit] = 1
-        for i, bit in enumerate(bits):
-            offset = i*samples_per_bit
-            line_sdi[offset:offset+samples_per_bit] = bit
-        line_csi = np.pad(line_csi, 1, mode='constant', constant_values=1)
-        line_clk = np.pad(line_clk, 1, mode='constant', constant_values=0)
-        line_sdi = np.pad(line_sdi, 1, mode='constant', constant_values=0)
-        return np.vstack((line_csi, line_clk, line_sdi))
+    def _send_bit(self, task, bit):
+        ni.DAQmxWriteDigitalLines(task, 1, True, 0,
+                                  ni.DAQmx_Val_GroupByChannel,
+                                  np.array([bit], dtype=np.uint8),
+                                  ctypes.c_int32(), None)
 
     def _send_bits(self, bits):
-        com_signal = self._build_com_signal(bits)
-        samples = com_signal.shape[-1]
-        result = ctypes.c_int32()
-        ni.DAQmxWriteDigitalLines(self._task_com, samples, False,
-                                  -1, ni.DAQmx_Val_GroupByChannel,
-                                  com_signal.ravel().astype(np.uint8), result,
-                                  None)
-        ni.DAQmxStartTask(self._task_com)
-        ni.DAQmxWaitUntilTaskDone(self._task_com, 1)
-        ni.DAQmxStopTask(self._task_com)
+        self._send_bit(self._task_cs, 0)
+        log.debug('Sending %r to com line', bits)
+        for bit in bits:
+            self._send_bit(self._task_sdi, bit)
+            self._send_bit(self._task_clk, 1)
+            self._send_bit(self._task_clk, 0)
+        self._send_bit(self._task_cs, 1)
 
     def set_gain(self, right=None, left=None):
         '''
@@ -1182,40 +1100,11 @@ def acquire(*args, **kwargs):
     return daq.waveform_buffer
 
 
-################################################################################
-# Tests
-################################################################################
-class TestDAQmxAttenControl(unittest.TestCase):
-
-    def test_bitword(self):
-        test_values = [
-            ((254, 8, 'big-endian'), [1, 1, 1, 1, 1, 1, 1, 0]),
-            ((254, 8, 'little-endian'), [0, 1, 1, 1, 1, 1, 1, 1]),
-            ((128, 8, 'little-endian'), [0, 0, 0, 0, 0, 0, 0, 1]),
-            ((128, 8, 'big-endian'), [1, 0, 0, 0, 0, 0, 0, 0]),
-            ((128, 16, 'big-endian'), [0, 0, 0, 0, 0, 0, 0, 0,
-                                       1, 0, 0, 0, 0, 0, 0, 0]),
-            ((128, 16, 'big-endian'), [0, 0, 0, 0, 0, 0, 0, 0,
-                                       1, 0, 0, 0, 0, 0, 0, 0]),
-            ((254 | (128 << 8), 16, 'big-endian'), [1, 0, 0, 0, 0, 0, 0, 0,
-                                                    1, 1, 1, 1, 1, 1, 1, 0]),
-            ((254 | (128 << 8), 16, 'little-endian'), [0, 1, 1, 1, 1, 1, 1, 1,
-                                                       0, 0, 0, 0, 0, 0, 0, 1]),
-        ]
-        for args, expected in test_values:
-            actual = get_bits(*args)
-            self.assertEqual(actual, expected)
-
-    def test_gain_to_bits(self):
-        atten = DAQmxAttenControl()
-        self.assertEqual(atten._gain_to_byte(31.5), 255)
-        self.assertEqual(atten._gain_to_byte(-95.5), 1)
-
-        # Right, left
-        actual = atten._gain_to_bits(31.0, -32.0)
-        expected = [1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0]
-        self.assertEqual(actual, expected)
-
-
 if __name__ == '__main__':
-    unittest.main()
+    import logging.config
+    logging.basicConfig(level='DEBUG')
+    import time
+    atten = DAQmxAttenControl()
+    atten.setup()
+    atten.set_mute(True)
+    atten.set_gain(-30.5, 30.5)
