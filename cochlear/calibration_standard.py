@@ -188,3 +188,8 @@ class StandardCal(HasTraits):
 def launch_gui(**kwargs):
         handler = StandardCalController()
         StandardCal().edit_traits(handler=handler, **kwargs)
+
+
+if __name__ == '__main__':
+    handler = StandardCalController()
+    StandardCal().configure_traits(handler=handler)

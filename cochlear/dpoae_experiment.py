@@ -148,10 +148,11 @@ class DPOAEController(AbstractController):
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
     iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
 
-    primary_spl = Float(label='Primary output @ 1Vrms, 0 dB gain (dB SPL)',
-                        log=True, dtype=np.float32)
-    secondary_spl = Float(label='Secondary output @ 1Vrms, 0 dB gain (dB SPL)',
-                        log=True, dtype=np.float32)
+    kw = dict(log=True, dtype=np.float32)
+    primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
+    secondary_spl = Float(label='Secondary @ 1Vrms, 0dB att (dB SPL)', **kw)
+    primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
+    secondary_attenuation = Float(label='Secondary attenuation (dB)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -179,9 +180,13 @@ class DPOAEController(AbstractController):
         ('secondary_sens', np.float32),
         ('primary_spl', np.float32),
         ('secondary_spl', np.float32),
+        ('primary_attenuation', np.float32),
+        ('secondary_attenuation', np.float32),
     ]
 
-    search_gains = [-20, -40, 0]
+    search_gains = [-40, -60, -20, -30, -10, 0, 10]
+
+    mic_input_line = ni.DAQmxDefaults.MIC_INPUT
 
     def update_repetitions(self, repetitions):
         self.current_repetitions = repetitions
@@ -240,6 +245,8 @@ class DPOAEController(AbstractController):
                        secondary_sens=secondary_sens,
                        primary_spl=self.primary_spl,
                        secondary_spl=self.secondary_spl,
+                       primary_attenuation=self.primary_attenuation,
+                       secondary_attenuation=self.secondary_attenuation,
                        **results)
 
     def send(self, waveforms):
@@ -260,7 +267,8 @@ class DPOAEController(AbstractController):
         log.debug('Calibrating primary speaker')
         self.primary_sens = tc.tone_calibration_search(
             f1_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+            input_line=self.mic_input_line)
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
     @depends_on('exp_mic_gain')
@@ -268,7 +276,8 @@ class DPOAEController(AbstractController):
         log.debug('Calibrating secondary speaker')
         self.secondary_sens = tc.tone_calibration_search(
             f2_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT)
+            output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT,
+            input_line=self.mic_input_line)
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
@@ -308,6 +317,7 @@ class DPOAEController(AbstractController):
         self.offset_samples = int(response_offset*self.adc_fs)
 
         self.iface_atten = ni.DAQmxAttenControl()
+        self.iface_atten.setup()
 
         c1 = blocks.Tone(frequency=f1_frequency, level=f1_level, name='f1') >> \
             blocks.Cos2Envelope(duration=probe_duration,
@@ -327,7 +337,7 @@ class DPOAEController(AbstractController):
             output_line=ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
             duration=probe_duration+iti, fs=self.dac_fs)
         self.iface_adc = ni.TriggeredDAQmxSource(
-            input_line=ni.DAQmxDefaults.MIC_INPUT,
+            input_line=self.mic_input_line,
             fs=self.adc_fs,
             epoch_duration=response_window,
             trigger_delay=response_offset,
@@ -341,9 +351,8 @@ class DPOAEController(AbstractController):
         self.iface_dac.add_channel(c2, name='secondary')
 
         log.debug('Setting hardware attenuation')
-        self.iface_atten.setup()
-        self.iface_dac.set_best_attenuations()
-        self.iface_atten.clear()
+        self.primary_attenuation, self.secondary_attenuation = \
+            self.iface_dac.set_best_attenuations()
 
         try:
             self.iface_dac.queue_init('FIFO')
@@ -517,6 +526,10 @@ class DPOAEExperiment(AbstractExperiment):
                              format_str='%0.2f'),
                         Item('handler.secondary_spl', style='readonly',
                              format_str='%0.2f'),
+                        Item('handler.primary_attenuation', style='readonly',
+                             format_str='%0.2f'),
+                        Item('handler.secondary_attenuation', style='readonly',
+                             format_str='%0.2f'),
                         show_border=True,
                     ),
                 ),
@@ -571,17 +584,22 @@ def launch_gui(mic_cal, filename, **kwargs):
 
 if __name__ == '__main__':
     from cochlear import configure_logging
-    from neurogen.calibration import InterpCalibration
+    from neurogen.calibration import InterpCalibration, FlatCalibration
+    from neurogen.util import db
     import PyDAQmx as pyni
 
-    #configure_logging('temp.log')
+    configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)
+    mic_input = ni.DAQmxDefaults.MIC_INPUT
+
+    #c = FlatCalibration(db(2.703e-3))
+    #mic_input = ni.DAQmxDefaults.REF_MIC_INPUT
 
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = DPOAEData(store_node=fh.root)
         experiment = DPOAEExperiment(paradigm=DPOAEParadigm(), data=data)
-        controller = DPOAEController(mic_cal=c)
+        controller = DPOAEController(mic_cal=c, mic_input_line=mic_input)
         experiment.configure_traits(handler=controller)

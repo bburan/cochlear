@@ -111,8 +111,9 @@ class ABRController(AbstractController):
     iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
     iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
 
-    primary_spl = Float(label='Primary output @ 1Vrms, 0 dB gain (dB SPL)',
-                        log=True, dtype=np.float32)
+    kw = dict(log=True, dtype=np.float32)
+    primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
+    primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -124,9 +125,10 @@ class ABRController(AbstractController):
     extra_dtypes = [
         ('primary_sens', np.float32),
         ('primary_spl', np.float32),
+        ('primary_attenuation', np.float32)
     ]
 
-    search_gains = [-20, -40, 0]
+    search_gains = [-40, -60, -20, -30, -10, 0, 10]
 
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
@@ -182,6 +184,8 @@ class ABRController(AbstractController):
 
         # Set up the hardware
         iface_atten = ni.DAQmxAttenControl()
+        iface_atten.setup()
+
         iface_adc = ni.TriggeredDAQmxSource(
             epoch_duration=epoch_duration,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
@@ -200,9 +204,7 @@ class ABRController(AbstractController):
             attenuator_channel=ni.DAQmxDefaults.PRIMARY_ATTEN_CHANNEL)
 
         iface_dac.add_channel(channel, name='primary')
-        iface_atten.setup()
-        iface_dac.set_best_attenuations()
-        iface_atten.clear()
+        self.primary_attenuation = iface_dac.set_best_attenuations()[0]
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
@@ -247,7 +249,8 @@ class ABRController(AbstractController):
         primary_sens = self.primary_sens.get_sens(
             self.get_current_value('frequency'))
         self.log_trial(waveforms=waveforms, primary_sens=primary_sens,
-                       primary_spl=self.primary_spl, fs=self.adc_fs)
+                       primary_spl=self.primary_spl, fs=self.adc_fs,
+                       primary_attenuation=self.primary_attenuation)
 
 
 class ABRExperiment(AbstractExperiment):
@@ -317,6 +320,8 @@ class ABRExperiment(AbstractExperiment):
                 VGroup(
                     Item('handler.primary_spl', style='readonly',
                          format_str='%0.2f'),
+                    Item('handler.primary_attenuation', style='readonly',
+                         format_str='%0.2f'),
                     Item('handler.current_repetitions', style='readonly',
                          label='Repetitions'),
                     Item('handler.current_valid_repetitions', style='readonly',
@@ -377,6 +382,20 @@ class ABRData(AbstractData):
         self.waveform_node.append(waveforms[np.newaxis])
 
 
+def merge_abr_files(filenames, new_filename):
+    with tables.open_file(new_filename) as fh_new:
+        trial_logs = []
+        waveforms = []
+        fs = []
+        for filename in filenames:
+            with tables.open_file(filename) as fh:
+                trial_logs.append(fh.root.trial_log.read())
+                waveforms.append(fh.root.waveforms.read())
+                fs.append(fh.root.waveforms._v_attrs.fs)
+
+        fh_new.create_table('/', 'trial_log', trial_logs[0].dtype)
+
+
 if __name__ == '__main__':
     from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
@@ -384,7 +403,7 @@ if __name__ == '__main__':
 
     #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:

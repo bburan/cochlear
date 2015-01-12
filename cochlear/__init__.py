@@ -29,10 +29,10 @@ def configure_logging(filename):
         'loggers': {
             '__main__': {'level': 'DEBUG'},
             'cochlear': {'level': 'DEBUG'},
+            'cochlear.nidaqmx': {'level': 'ERROR'},
             },
         'root': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             },
         }
     logging.config.dictConfig(logging_config)
-

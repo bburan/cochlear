@@ -139,6 +139,7 @@ def tone_calibration_search(frequency, input_calibration, gains, vrms=1, *args,
         except CalibrationError:
             pass
 
+
 def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
                    f1_vrms=1, f2_vrms=1, repetitions=1, fs=200e3,
                    max_thd=0.01, min_db=10, duration=0.1, trim=0.01):
@@ -377,7 +378,7 @@ class BaseToneCalibrationController(Controller):
 
     gain_step = Float(10)
     current_gain = Float(-20)
-    max_gain = Float(31.5)
+    max_gain = Float(0)
     min_gain = Float(-96.5)
     current_max_gain = Float(31.5, label='Current max. gain (dB)')
 
@@ -487,7 +488,7 @@ class BaseToneCalibration(HasTraits):
     # Calibration settings
     fs = Float(400e3, label='AO/AI sampling rate (Hz)', save=True)
 
-    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', save=True)
+    exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', save=True)
 
     output = Enum(('/Dev1/ao0', '/Dev1/ao1'), label='Output (channel)', save=True)
     input_options = ['/Dev1/ai{}'.format(i) for i in range(4)]
@@ -500,11 +501,11 @@ class BaseToneCalibration(HasTraits):
     iti = Float(0.001, label='Inter-tone interval', save=True)
     trim = Float(0.001, label='Trim onset (sec)', save=True)
 
-    start_octave = Float(-2, label='Start octave', save=True)
+    start_octave = Float(1, label='Start octave', save=True)
     start_frequency = Property(depends_on='start_octave', label='End octave', save=True)
-    end_octave = Float(6, save=True)
+    end_octave = Float(4, save=True)
     end_frequency = Property(depends_on='end_octave', save=True)
-    octave_spacing = Float(0.25, label='Octave spacing', save=True)
+    octave_spacing = Float(1, label='Octave spacing', save=True)
 
     include_dpoae = Bool(True)
     dpoae_window = Float(100e-3, label='DPOAE analysis window')
@@ -623,7 +624,7 @@ class MicToneCalibration(BaseToneCalibration):
                      label='Ref. mic. (channel)', save=True)
 
     ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', save=True)
-    ref_mic_sens = Float(2.685, label='Ref. mic. sens (mV/Pa)', save=True)
+    ref_mic_sens = Float(2.703, label='Ref. mic. sens (mV/Pa)', save=True)
     ref_mic_sens_dbv = Property(depends_on='ref_mic_sens', save=True,
                                 label='Ref. mic. sens. V (dB re Pa)')
 
@@ -692,10 +693,14 @@ class MicToneCalibration(BaseToneCalibration):
 class MicToneCalibrationController(BaseToneCalibrationController):
 
     def next_gain(self, results):
-        if results['exp_thd'] >= 0.01:
+        print results['exp_thd']
+        print results['exp_mic_rms']
+        if results['exp_thd'] >= 0.1:
+            print 'thd err'
             self.current_max_gain = self.current_gain
             return self.current_gain - self.gain_step
         elif results['exp_mic_rms'] <= -15:
+            print 'rms err'
             return self.current_gain + self.gain_step
         else:
             return self.current_gain
@@ -829,14 +834,14 @@ def launch_mic_cal_gui(**kwargs):
 
 
 if __name__ == '__main__':
-    #handler = MicToneCalibrationController()
-    #MicToneCalibration().configure_traits(handler=handler)
+    handler = MicToneCalibrationController()
+    MicToneCalibration().configure_traits(handler=handler)
 
     # Verify calibration
-    mic_sens_dbv = db(2.685*1e-3)
-    ref_cal = InterpCalibration([0, 100e3], [mic_sens_dbv, mic_sens_dbv])
-    mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
-    exp_cal = InterpCalibration.from_mic_file(mic_file, fixed_gain=-40)
+    #mic_sens_dbv = db(2.685*1e-3)
+    #ref_cal = InterpCalibration([0, 100e3], [mic_sens_dbv, mic_sens_dbv])
+    #mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
+    #exp_cal = InterpCalibration.from_mic_file(mic_file, fixed_gain=-40)
     #for freq in (500, 1000, 2000, 4000, 8000, 16000):
     #    ref = tone_spl(freq, ref_cal, input_line='/Dev1/ai0',
     #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
@@ -844,11 +849,11 @@ if __name__ == '__main__':
     #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
     #    print ref, exp
 
-    ref = tone_spl(3330, ref_cal, input_line='/Dev1/ai0',
-                output_line='/Dev1/ao0', vrms=1, gain=-20)
-    exp = tone_spl(3330, exp_cal, input_line='/Dev1/ai1',
-                output_line='/Dev1/ao0', vrms=1, gain=-20)
-    print ref+20, exp+20
+    #ref = tone_spl(1000, ref_cal, input_line='/Dev1/ai0',
+    #            output_line='/Dev1/ao0', vrms=1, gain=-60)
+    #exp = tone_spl(3330, exp_cal, input_line='/Dev1/ai1',
+    #            output_line='/Dev1/ao0', vrms=1, gain=-20)
+    #print ref+20, exp+20
 
     #import PyDAQmx as pyni
     #pyni.DAQmxResetDevice('Dev1')

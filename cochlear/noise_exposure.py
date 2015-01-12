@@ -51,17 +51,17 @@ class NoiseExposureParadigm(AbstractParadigm):
                     dtype=np.float, **kw)
     order = Expression(7, label='Filter order', dtype=np.float, **kw)
 
-    level = Expression(94, label='Level (dB SPL)', dtype=np.float, **kw)
+    level = Expression(100, label='Level (dB SPL)', dtype=np.float, **kw)
     seed = Expression(1, label='Noise seed', dtype=np.int, **kw)
     duration = Expression(60, label='Exposure duration (sec)',
                           dtype=np.float, **kw)
-    rise_time = Expression(10, label='Noise rise time (sec)',
+    rise_time = Expression(0, label='Noise rise time (sec)',
                            dtype=np.float, **kw)
 
-    mic_sens = Float(2.33, label='Mic. sens. (mV/Pa)', dtype=np.float, **kw)
+    mic_sens = Float(2.7, label='Mic. sens. (mV/Pa)', dtype=np.float, **kw)
     mic_sens_dbv = Property(depends_on='mic_sens', dtype=np.float,
                             label='Mic. sens. dB(V/Pa)', **kw)
-    speaker_sens = Float(50.0, label='Speaker sens. (mV/Pa)', dtype=np.float,
+    speaker_sens = Float(86.89, label='Speaker sens. (mV/Pa)', dtype=np.float,
                          **kw)
     speaker_sens_dbv = Property(depends_on='speaker_sens', dtype=np.float,
                                 label='Speaker sens. dB(V/Pa)', **kw)
@@ -248,7 +248,10 @@ class NoiseExposureExperiment(AbstractExperiment):
         plot = Plot(self.rms_data)
         plot.index_range.high_setting = 'auto'
         plot.index_range.low_setting = 'track'
-        plot.index_range.tracking_amount = 60
+        plot.index_range.tracking_amount = 30
+        plot.value_range.high_setting = 'auto'
+        plot.value_range.low_setting = 'track'
+        plot.value_range.tracking_amount = 5
         plot.plot(('time', 'rms'))
         return plot
 
@@ -303,30 +306,6 @@ class NoiseExposureExperiment(AbstractExperiment):
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
         ),
-        #menubar=MenuBar(
-        #    Menu(
-        #        ActionGroup(
-        #            Action(name='Load settings', action='load_settings'),
-        #            Action(name='Save settings', action='save_settings'),
-        #        ),
-        #        name='&Settings',
-        #    ),
-        #    Menu(
-        #        ActionGroup(
-        #            Action(name='Load calibration', action='load_calibration'),
-        #        ),
-        #        ActionGroup(
-        #            Action(name='Calibrate reference microphone',
-        #                   action='calibrate_reference_microphone'),
-        #            Action(name='Calibrate microphone',
-        #                   action='calibrate_microphone'),
-        #            Action(name='Calibrate speaker',
-        #                   action='calibrate_speaker'),
-        #        ),
-        #        name='&Calibration'
-        #    ),
-
-        #),
         width=0.5,
         height=0.5,
         id='lbhb.NoiseExposureExperiment',
@@ -359,9 +338,10 @@ def configure_logging(filename):
                 }
             },
         'loggers': {
-            '__main__': {'level': 'DEBUG'},
-            'cochlear': {'level': 'DEBUG'},
-            'cochlear.nidaqmx': {'level': 'DEBUG'},
+            '__main__': {'level': 'ERROR'},
+            'cochlear': {'level': 'ERROR'},
+            'cochlear.nidaqmx': {'level': 'ERROR'},
+            'neurogen.block_definitions': {'level': 'DEBUG'},
             },
         'root': {
             'handlers': ['console', 'file'],

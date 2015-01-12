@@ -14,15 +14,15 @@ from experiment import icon_dir
 from neurogen.calibration import InterpCalibration
 
 from cochlear import settings
-from cochlear import tone_calibration as cal
+from cochlear import calibration_chirp as calibration
 from cochlear import abr_experiment
 from cochlear import dpoae_experiment
 
 
 class ExperimentController(Controller):
 
-    def run_microphone_calibrataion(self, info):
-        cal.launch_mic_cal_gui(parent=info.ui.control, kind='livemodal')
+    def run_microphone_calibration(self, info):
+        calibration.launch_gui('ao0', parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
     def _get_filename(self, info, experiment):
@@ -81,7 +81,8 @@ class ExperimentSetup(HasTraits):
         return ['Brad', 'Stephen']
 
     def _get_animals(self):
-        return ['Beowulf', 'Tarragon', 'Dill', 'Parsley']
+        return ['Beowulf', 'Tarragon', 'Dill', 'Parsley', 'Cumin', 'Zeera',
+                'Gamun']
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)

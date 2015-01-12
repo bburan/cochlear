@@ -41,12 +41,13 @@ class DAQmxDefaults(object):
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
     AI_TRIGGER = '/{}/PFI1'.format(DEV)
+    #AI_TRIGGER = '/{}/ai/StartTrigger'.format(DEV)
     AI_RUN = None
     AI_RANGE = 10
 
     AO_TRIGGER = '/{}/port0/line0'.format(DEV)
     AO_RUN = '/{}/port0/line2'.format(DEV)
-    AO_RANGE = 10
+    AO_RANGE = np.sqrt(2)
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
     PRIMARY_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
     SECONDARY_SPEAKER_OUTPUT = '/{}/ao1'.format(DEV)
@@ -58,11 +59,11 @@ class DAQmxDefaults(object):
     AI_FS = 200e3
     AO_FS = 200e3
 
-    VOLUME_MUTE = '/{}/port1/line0'.format(DEV)
-    VOLUME_ZC = '/{}/port1/line1'.format(DEV)
     VOLUME_CLK = '/{}/port1/line2'.format(DEV)
     VOLUME_CS = '/{}/port1/line3'.format(DEV)
     VOLUME_SDI = '/{}/port1/line4'.format(DEV)
+    VOLUME_MUTE = '/{}/port1/line5'.format(DEV)
+    VOLUME_ZC = '/{}/port1/line6'.format(DEV)
 
     TRIGGER_DURATION = 1e-3
 
@@ -622,8 +623,8 @@ class DAQmxChannel(Channel):
 
     # Based on testing of the PGA2310/OPA234/BUF634 circuit with volume control
     # set to 0 dB, this is the maximum allowable voltage without clipping.
-    voltage_min = -1.5
-    voltage_max = 1.5
+    voltage_min = -1.1*np.sqrt(2)
+    voltage_max = 1.1*np.sqrt(2)
 
     attenuator = ScalarInput(default=None, unit=None)
     attenuator_channel = ScalarInput(default=0, unit=None)
@@ -765,6 +766,7 @@ class DAQmxAttenControl(DAQmxBase):
     # +31.5 dB.
     VOLUME_STEP = 0.5
     VOLUME_MAX = 31.5
+    #VOLUME_MAX = 0
     VOLUME_MIN = -96
     VOLUME_BITS = 16
 
@@ -809,11 +811,11 @@ class DAQmxAttenControl(DAQmxBase):
     def setup(self):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
-        self._task_mute = create_task('Mute control')
-        self._task_zc = create_task('ZC control')
-        self._task_clk = create_task('Serial CLK')
-        self._task_cs = create_task('Serial CS')
-        self._task_sdi = create_task('Serial SDI')
+        self._task_mute = create_task()
+        self._task_zc = create_task()
+        self._task_clk = create_task()
+        self._task_cs = create_task()
+        self._task_sdi = create_task()
 
         # Set up digital output lines.  In theory we can combine both of these
         # lines into a single task, but it's easier to program them separately.
@@ -832,8 +834,6 @@ class DAQmxAttenControl(DAQmxBase):
         self.set_mute(False)
         self.set_zero_crossing(False)
         self.set_atten(np.inf, np.inf)
-        #self._tasks.extend((self._task_zc, self._task_mute, self._task_clk,
-        #                    self._task_cs, self._task_sdi))
         super(DAQmxAttenControl, self).setup()
 
     def start(self):
@@ -842,6 +842,12 @@ class DAQmxAttenControl(DAQmxBase):
         self.set_mute(False)
         self.set_zero_crossing(False)
         self.set_atten(np.inf, np.inf)
+
+    def clear(self):
+        for task in (self._task_zc, self._task_mute, self._task_clk,
+                     self._task_cs, self._task_sdi):
+            ni.DAQmxClearTask(task)
+        super(DAQmxAttenControl, self).clear()
 
     def _gain_to_byte(self, gain):
         '''

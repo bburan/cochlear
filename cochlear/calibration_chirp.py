@@ -14,7 +14,7 @@ from experiment import (icon_dir, AbstractController, AbstractParadigm)
 from experiment.util import get_save_file
 
 from neurogen import block_definitions as blocks
-from neurogen.calibration import InterpCalibration
+from neurogen.calibration import InterpCalibration, FlatCalibration
 from neurogen.util import patodb, db
 
 import os.path
@@ -37,6 +37,7 @@ from experiment.util import get_save_file
 from neurogen.util import db, dbi
 
 from cochlear import nidaqmx as ni
+from cochlear import tone_calibration as tc
 from cochlear import calibration_standard as reference_calibration
 import settings
 
@@ -44,10 +45,10 @@ DAC_FS = 200e3
 ADC_FS = 200e3
 
 
-def get_chirp_transform(vrms):
+def get_chirp_transform(vrms, start_atten=6, end_atten=-6):
     calibration_data = np.array([
-        (1, 30),
-        (100e3, -10),
+        (0, start_atten),
+        (100e3, end_atten),
     ])
     frequencies = calibration_data[:, 0]
     magnitude = calibration_data[:, 1]
@@ -62,17 +63,19 @@ class ChirpCalSettings(AbstractParadigm):
     rise_time = Float(5e-3, label='Envelope rise time', **kw)
     amplitude = Float(1, label='Waveform amplitude (Vrms)', **kw)
     output_gain = Float(6, label='Output gain (dB)', **kw)
-    freq_lb = Float(0.1e3, label='Start frequency (Hz)', **kw)
-    freq_ub = Float(60e3, label='End frequency (Hz)', **kw)
+    freq_lb = Float(0.5e3, label='Start frequency (Hz)', **kw)
+    freq_ub = Float(50e3, label='End frequency (Hz)', **kw)
     freq_resolution = Float(50, label='Frequency resolution (Hz)')
-    fft_averages = Int(32, label='Number of FFTs', **kw)
-    waveform_averages = Int(32, label='Number of chirps per FFT', **kw)
+    fft_averages = Int(8, label='Number of FFTs', **kw)
+    waveform_averages = Int(8, label='Number of chirps per FFT', **kw)
     ici = Float(0.01, label='Inter-chirp interval', **kw)
+    start_attenuation = Float(30, label='Start attenuation (dB)', **kw)
+    end_attenuation = Float(-30, label='End attenuation (dB)', **kw)
 
     ref_mic_sens_mv = Float(2.703, label='Ref. mic. sens. (mV/Pa)', **kw)
     ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', **kw)
     ref_mic_sens = Property(depends_on='ref_mic_sens_mv', **kw)
-    exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
+    exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', **kw)
 
     averages = Property(depends_on='fft_averages, waveform_averages',
                         label='Number of chirps', **kw)
@@ -120,6 +123,8 @@ class ChirpCalSettings(AbstractParadigm):
         Item('averages', style='readonly'),
         Item('duration', style='readonly'),
         Item('total_duration', style='readonly'),
+        'start_attenuation',
+        'end_attenuation',
         show_border=True,
         label='Chirp settings',
     )
@@ -325,6 +330,10 @@ class ChirpCal(HasTraits):
                    image=ImageResource('Stop', icon_dir),
                    enabled_when='handler.state=="running"'),
             '-',
+            Action(name='Verify', action='verify_calibration',
+                   image=ImageResource('button_ok', icon_dir),
+                   enabled_when='handler.complete'),
+            '-',
             Action(name='Save', action='save',
                    image=ImageResource('document_save', icon_dir),
                    enabled_when='handler.complete')
@@ -400,7 +409,9 @@ class ChirpCalController(AbstractController):
         output_gain = self.get_current_value('output_gain')
         vrms = self.get_current_value('amplitude')
         rise_time = self.get_current_value('rise_time')
-        calibration = get_chirp_transform(vrms)
+        start_atten = self.get_current_value('start_attenuation')
+        end_atten = self.get_current_value('end_attenuation')
+        calibration = get_chirp_transform(vrms, start_atten, end_atten)
         analog_output = '/{}/{}'.format(ni.DAQmxDefaults.DEV, output)
 
         self.iface_dac = ni.QueuedDAQmxPlayer(
@@ -449,9 +460,34 @@ class ChirpCalController(AbstractController):
         self.complete = True
         self.stop()
 
-    def run_reference_calibration(self, info):
+    def run_reference_calibration(self, info=None):
         reference_calibration.launch_gui(parent=info.ui.control,
                                          kind='livemodal')
+
+    def verify_calibration(self, info=None):
+        frequency = self.model.data.frequency
+        exp_sens = self.model.data.exp_mic_sens
+        ref_sens = self.get_current_value('ref_mic_sens')
+        exp_gain = self.get_current_value('exp_mic_gain')
+        ref_gain = self.get_current_value('ref_mic_gain')
+        print ref_sens
+
+        exp_cal = InterpCalibration(frequency, exp_sens, fixed_gain=-exp_gain)
+        ref_cal = FlatCalibration(db(ref_sens), fixed_gain=-ref_gain)
+        exp_input = ni.DAQmxDefaults.MIC_INPUT
+        ref_input = ni.DAQmxDefaults.REF_MIC_INPUT
+
+        gains = [-80, -60, -40, -20, 0, 10]
+        for f in (1e3, 2e3, 4e3, 8e3, 16e3):
+
+            sr_cal = tc.tone_calibration_search(f, exp_cal, gains=gains,
+                                                input_line=exp_input)
+            se_cal = tc.tone_calibration_search(f, ref_cal, gains=gains,
+                                                input_line=ref_input)
+            if sr_cal is not None and se_cal is not None:
+                print f,
+                print sr_cal._sensitivity,
+                print se_cal._sensitivity
 
 
 def launch_gui(output='ao0', **kwargs):
@@ -467,10 +503,6 @@ def launch_gui(output='ao0', **kwargs):
 if __name__ == '__main__':
     output = 'ao0'
     tempfile = os.path.join(settings.TEMP_DIR, 'temp_mic.cal')
-    #from cochlear import configure_logging
-    #configure_logging('temp.log')
-    import logging
-    logging.basicConfig(level='DEBUG')
     with tables.open_file(tempfile, 'w') as fh:
         data = ChirpCalData(store_node=fh.root)
         controller = ChirpCalController(filename=tempfile)
