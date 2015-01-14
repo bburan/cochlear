@@ -5,9 +5,9 @@ import re
 import numpy as np
 import tables
 
-from traits.api import (HasTraits, Property, List, Str, Instance, Date)
+from traits.api import (HasTraits, Property, List, Str, Instance, Date, Enum)
 from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
-                          Controller)
+                          Controller, HGroup)
 from pyface.api import ImageResource
 
 from experiment import icon_dir
@@ -38,10 +38,34 @@ class ExperimentController(Controller):
         abr_experiment.launch_gui(info.object.mic_cal, filename=filename,
                                   parent=info.ui.control, kind='livemodal')
 
+    def run_abr_check(self, info):
+        paradigm_dict = {
+            'averages': 128,
+            'repetition_rate': 40,
+            'level': 'exact_order([90], c=1)'
+        }
+        abr_experiment.launch_gui(info.object.mic_cal,
+                                  filename=None,
+                                  paradigm_dict=paradigm_dict,
+                                  parent=info.ui.control,
+                                  kind='livemodal')
+
+
     def run_dpoae_experiment(self, info):
         filename = self._get_filename(info, 'DPOAE')
         dpoae_experiment.launch_gui(info.object.mic_cal, filename=filename,
                                     parent=info.ui.control, kind='livemodal')
+
+    def run_dpoae_check(self, info):
+        paradigm_dict = {
+            'f2_frequency': 8e3,
+            'f2_level': 'exact_order(np.arange(30, 95, 10), c=1)'
+        }
+        dpoae_experiment.launch_gui(info.object.mic_cal,
+                                    filename=None,
+                                    paradigm_dict=paradigm_dict,
+                                    parent=info.ui.control,
+                                    kind='livemodal')
 
 
 class ExperimentSetup(HasTraits):
@@ -52,6 +76,7 @@ class ExperimentSetup(HasTraits):
 
     animals = Property(List)
     animal = Str
+    ear = Enum(('right', 'left'))
 
     calibrations = List
     calibration = Str
@@ -64,8 +89,9 @@ class ExperimentSetup(HasTraits):
         return dt.date.today()
 
     def _get_base_filename(self):
-        t = '{{date}}-{{time}} {} {} {} {{experiment}}.hdf5'
-        f = t.format(self.experimenter, self.animal, self.experiment_note)
+        t = '{{date}}-{{time}} {} {} {} {} {{experiment}}.hdf5'
+        f = t.format(self.experimenter, self.animal, self.ear,
+                     self.experiment_note)
         return re.sub(r'\s+', r' ', f)
 
     def _calibrations_default(self):
@@ -91,7 +117,10 @@ class ExperimentSetup(HasTraits):
     view = View(
         VGroup(
             Item('experimenter', editor=EnumEditor(name='experimenters')),
-            Item('animal', editor=EnumEditor(name='animals')),
+            HGroup(
+                Item('animal', editor=EnumEditor(name='animals')),
+                Item('ear'),
+            ),
             Item('experiment_note'),
             Item('calibration', editor=EnumEditor(name='calibrations')),
             Item('base_filename', style='readonly'),
@@ -108,12 +137,24 @@ class ExperimentSetup(HasTraits):
                                 'and animal '
                                 'and experimenter ',
                    action='run_abr_experiment'),
+            Action(name='ABR check',
+                   image=ImageResource('view_statistics', icon_dir),
+                   enabled_when='mic_cal is not None '
+                                'and animal '
+                                'and experimenter ',
+                   action='run_abr_check'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
                    enabled_when='mic_cal is not None '
                                 'and animal '
                                 'and experimenter ',
                    action='run_dpoae_experiment'),
+            Action(name='DPOAE check',
+                   image=ImageResource('datashowchart', icon_dir),
+                   enabled_when='mic_cal is not None '
+                                'and animal '
+                                'and experimenter ',
+                   action='run_dpoae_check'),
         ),
     )
 
