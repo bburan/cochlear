@@ -359,10 +359,17 @@ class ABRExperiment(AbstractExperiment):
     )
 
 
-def launch_gui(mic_cal, filename, **kwargs):
-    with tables.open_file(filename, 'w') as fh:
+def launch_gui(mic_cal, filename, paradigm_dict=None, **kwargs):
+    if filename is None:
+        filename = 'dummy'
+        tbkw = {'driver': 'H5FD_CORE', 'driver_core_backing_store': 0}
+    else:
+        tbkw = {}
+    with tables.open_file(filename, 'w', **tbkw) as fh:
         data = ABRData(store_node=fh.root)
-        paradigm = ABRParadigm()
+        if paradigm_dict is None:
+            paradigm_dict = {}
+        paradigm = ABRParadigm(**paradigm_dict)
         experiment = ABRExperiment(paradigm=paradigm, data=data)
         controller = ABRController(mic_cal=mic_cal)
         experiment.edit_traits(handler=controller, **kwargs)

@@ -573,10 +573,17 @@ class DPOAEExperiment(AbstractExperiment):
     )
 
 
-def launch_gui(mic_cal, filename, **kwargs):
+def launch_gui(mic_cal, filename, paradigm_dict=None, **kwargs):
+    if filename is None:
+        filename = 'dummy'
+        tbkw = {'driver': 'H5FD_CORE', 'driver_core_backing_store': 0}
+    else:
+        tbkw = {}
     with tables.open_file(filename, 'w') as fh:
         data = DPOAEData(store_node=fh.root)
-        paradigm = DPOAEParadigm()
+        if paradigm_dict is None:
+            paradigm_dict = {}
+        paradigm = DPOAEParadigm(**paradigm_dict)
         experiment = DPOAEExperiment(data=data, paradigm=paradigm)
         controller = DPOAEController(mic_cal=mic_cal)
         experiment.edit_traits(handler=controller, **kwargs)
