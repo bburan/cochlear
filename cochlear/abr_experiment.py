@@ -389,20 +389,6 @@ class ABRData(AbstractData):
         self.waveform_node.append(waveforms[np.newaxis])
 
 
-def merge_abr_files(filenames, new_filename):
-    with tables.open_file(new_filename) as fh_new:
-        trial_logs = []
-        waveforms = []
-        fs = []
-        for filename in filenames:
-            with tables.open_file(filename) as fh:
-                trial_logs.append(fh.root.trial_log.read())
-                waveforms.append(fh.root.waveforms.read())
-                fs.append(fh.root.waveforms._v_attrs.fs)
-
-        fh_new.create_table('/', 'trial_log', trial_logs[0].dtype)
-
-
 if __name__ == '__main__':
     from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
