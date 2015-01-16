@@ -88,10 +88,11 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    f2_frequency = Expression( 'u(dp(2e3, 16e3, 1, response_window), f2_level)',
-                              label='f2 frequency (Hz)', **kw)
+    f2_frequency = Expression(
+        'u(dp(2.8e3, 32e3, 0.5, response_window), f2_level)',
+        label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(10, 95, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(10, label='DPOAE noise floor (dB SPL)', **kw)
 
@@ -109,8 +110,8 @@ class DPOAEParadigm(AbstractParadigm):
     # Signal acquisition settings.  Increasing time_averages increases SNR by
     # sqrt(N).  Increasing spectral averages reduces variance of result.  EPL
     # uses 8&4.
-    time_averages = Float(8, label='Time avg. (decr. noise floor)', **kw)
-    spectrum_averages = Float(4, label='Spectrum avg. (decr. variability)',
+    time_averages = Float(16, label='Time avg. (decr. noise floor)', **kw)
+    spectrum_averages = Float(2, label='Spectrum avg. (decr. variability)',
                               **kw)
 
     traits_view = View(
