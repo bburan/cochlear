@@ -9,4 +9,7 @@ setup(
     license='LICENSE.txt',
     description='Module for various auditory experiments',
     requires=['numpy'],
+    scripts=[
+        'scripts/launcher.py'
+    ]
 )
