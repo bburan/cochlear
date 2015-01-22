@@ -6,7 +6,7 @@ from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 
 from enable.api import Component, ComponentEditor
-from pyface.api import ImageResource
+from pyface.api import ImageResource, information
 from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
                        LogMapper, ArrayPlotData, Plot, HPlotContainer)
 
@@ -154,6 +154,8 @@ class DPOAEController(AbstractController):
     secondary_spl = Float(label='Secondary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
     secondary_attenuation = Float(label='Secondary attenuation (dB)', **kw)
+    primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
+    secondary_calibration_gain = Float(label='Secondary cal. gain (dB)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -183,6 +185,9 @@ class DPOAEController(AbstractController):
         ('secondary_spl', np.float32),
         ('primary_attenuation', np.float32),
         ('secondary_attenuation', np.float32),
+        ('primary_calibration_gain', np.float32),
+        ('secondary_calibration_gain', np.float32),
+        ('total_repetitions', np.float32),
     ]
 
     search_gains = [-40, -60, -20, -30, -10, 0, 10]
@@ -197,6 +202,7 @@ class DPOAEController(AbstractController):
         self.iface_adc.clear()
         self.iface_atten.clear()
         self.model.data.save()
+        information(self.info.ui.control, 'Experiment complete', 'Done!')
 
     def trial_complete(self):
         self.iface_dac.stop()
@@ -240,15 +246,19 @@ class DPOAEController(AbstractController):
             self.get_current_value('f1_frequency'))
         secondary_sens = self.secondary_sens.get_sens(
             self.get_current_value('f2_frequency'))
-        self.log_trial(waveforms=waveforms,
-                       fs=self.adc_fs,
-                       primary_sens=primary_sens,
-                       secondary_sens=secondary_sens,
-                       primary_spl=self.primary_spl,
-                       secondary_spl=self.secondary_spl,
-                       primary_attenuation=self.primary_attenuation,
-                       secondary_attenuation=self.secondary_attenuation,
-                       **results)
+        self.log_trial(
+            waveforms=waveforms,
+            fs=self.adc_fs,
+            primary_sens=primary_sens,
+            secondary_sens=secondary_sens,
+            primary_spl=self.primary_spl,
+            secondary_spl=self.secondary_spl,
+            primary_attenuation=self.primary_attenuation,
+            secondary_attenuation=self.secondary_attenuation,
+            primary_calibration_gain=self.primary_calibration_gain,
+            secondary_calibration_gain=self.secondary_calibration_gain,
+            total_repetitions=self.current_repetitions,
+            **results)
 
     def send(self, waveforms):
         self.waveforms.append(waveforms)
@@ -269,7 +279,8 @@ class DPOAEController(AbstractController):
         self.primary_sens = tc.tone_calibration_search(
             f1_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line)
+            input_line=self.mic_input_line,
+            callback=self.primary_calibration_gain_callback)
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
     @depends_on('exp_mic_gain')
@@ -278,7 +289,8 @@ class DPOAEController(AbstractController):
         self.secondary_sens = tc.tone_calibration_search(
             f2_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line)
+            input_line=self.mic_input_line,
+            callback=self.secondary_calibration_gain_callback)
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
@@ -372,6 +384,12 @@ class DPOAEController(AbstractController):
         self.iface_adc.start()
         log.debug('Starting DAC playout')
         self.iface_dac.play_queue()
+
+    def primary_calibration_gain_callback(self, value):
+        self.primary_calibration_gain = value
+
+    def secondary_calibration_gain_callback(self, value):
+        self.secondary_calibration_gain = value
 
 
 class DPOAEExperiment(AbstractExperiment):
@@ -523,6 +541,10 @@ class DPOAEExperiment(AbstractExperiment):
                         show_border=True,
                     ),
                     VGroup(
+                        Item('handler.primary_calibration_gain',
+                             style='readonly', format_str='%d'),
+                        Item('handler.secondary_calibration_gain',
+                             style='readonly', format_str='%d'),
                         Item('handler.primary_spl', style='readonly',
                              format_str='%0.2f'),
                         Item('handler.secondary_spl', style='readonly',
@@ -532,6 +554,7 @@ class DPOAEExperiment(AbstractExperiment):
                         Item('handler.secondary_attenuation', style='readonly',
                              format_str='%0.2f'),
                         show_border=True,
+                        label='Diagnostics',
                     ),
                 ),
             ),
