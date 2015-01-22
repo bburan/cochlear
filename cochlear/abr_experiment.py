@@ -60,7 +60,7 @@ class ABRParadigm(AbstractParadigm):
     # Signal acquisition settings
     averages = Expression(512, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
-    reject_threshold = Expression(2, dtype=np.float, **kw)
+    reject_threshold = Expression(0.1, dtype=np.float, **kw)
     exp_mic_gain = Expression(40, dtype=np.float, **kw)
 
     # Stimulus settings
@@ -191,6 +191,7 @@ class ABRController(AbstractController):
             input_line=ni.DAQmxDefaults.ERP_INPUT,
             pipeline=pipeline,
             fs=self.adc_fs,
+            expected_range=0.5,  # 10,000 gain
             complete_callback=self.trial_complete)
 
         iface_dac = ni.QueuedDAQmxPlayer(
