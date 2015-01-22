@@ -3,6 +3,9 @@ Classes for configuring and recording using NIDAQmx compatible devices
 '''
 
 # TODO setup DAQmxRegisterDoneEvent callback
+# TODO automate registry of pointer callbacks to keep them from getting
+# garbage-collected
+
 from __future__ import division
 
 import ctypes
@@ -28,8 +31,9 @@ log.addHandler(logging.NullHandler())
 ################################################################################
 class DAQmxDefaults(object):
     '''
-    Define defaults for configuring the niDAQmx tasks.  Often we have lines
-    hard-wired for certain purposes, so we need to use these lines.
+    Define defaults for configuring the niDAQmx tasks.  Lines are typically
+    hard-wired, so this is where you will configure the lines used for your
+    specific hardware.
     '''
     DEV = 'Dev1'
 
@@ -41,12 +45,14 @@ class DAQmxDefaults(object):
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
     AI_TRIGGER = '/{}/PFI1'.format(DEV)
-    #AI_TRIGGER = '/{}/ai/StartTrigger'.format(DEV)
     AI_RUN = None
     AI_RANGE = 10
 
+    # Must support hardware-timed DIO
     AO_TRIGGER = '/{}/port0/line0'.format(DEV)
+    # Must support hardware-timed DIO
     AO_RUN = '/{}/port0/line2'.format(DEV)
+
     AO_RANGE = np.sqrt(2)
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
     PRIMARY_SPEAKER_OUTPUT = '/{}/ao0'.format(DEV)
@@ -59,6 +65,7 @@ class DAQmxDefaults(object):
     AI_FS = 200e3
     AO_FS = 200e3
 
+    # Will be software-timed DIO
     VOLUME_CLK = '/{}/port1/line2'.format(DEV)
     VOLUME_CS = '/{}/port1/line3'.format(DEV)
     VOLUME_SDI = '/{}/port1/line4'.format(DEV)
