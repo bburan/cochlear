@@ -6,7 +6,7 @@ from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 
 from enable.api import Component, ComponentEditor
-from pyface.api import ImageResource, information
+from pyface.api import ImageResource
 from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
                        LogMapper, ArrayPlotData, Plot, HPlotContainer)
 
@@ -202,7 +202,6 @@ class DPOAEController(AbstractController):
         self.iface_adc.clear()
         self.iface_atten.clear()
         self.model.data.save()
-        information(self.info.ui.control, 'Experiment complete', 'Done!')
 
     def trial_complete(self):
         self.iface_dac.stop()

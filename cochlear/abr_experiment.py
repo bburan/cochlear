@@ -5,7 +5,7 @@ from traits.api import Instance, Float, Int, push_exception_handler, Bool
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 from enable.api import Component, ComponentEditor
-from pyface.api import ImageResource, information
+from pyface.api import ImageResource
 from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
                        OverlayPlotContainer, create_line_plot, ArrayPlotData,
                        Plot)
@@ -153,7 +153,6 @@ class ABRController(AbstractController):
         self.iface_adc.clear()
         self.iface_atten.clear()
         self.model.data.save()
-        information(self.info.ui.control, 'Experiment complete', 'Done!')
 
     def update_repetitions(self, value):
         self.current_repetitions = value
