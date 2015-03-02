@@ -410,7 +410,6 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
 
-    #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)

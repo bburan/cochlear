@@ -618,14 +618,10 @@ if __name__ == '__main__':
     from neurogen.util import db
     import PyDAQmx as pyni
 
-    configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
-
-    #c = FlatCalibration(db(2.703e-3))
-    #mic_input = ni.DAQmxDefaults.REF_MIC_INPUT
 
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
