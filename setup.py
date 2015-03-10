@@ -9,4 +9,5 @@ setup(
     license='LICENSE.txt',
     description='Module for various auditory experiments',
     requires=['numpy'],
+    scripts=['scripts/merge_abr_files.py'],
 )
