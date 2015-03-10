@@ -60,7 +60,7 @@ class ABRParadigm(AbstractParadigm):
     # Signal acquisition settings
     averages = Expression(512, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
-    reject_threshold = Expression(2, dtype=np.float, **kw)
+    reject_threshold = Expression(0.1, dtype=np.float, **kw)
     exp_mic_gain = Expression(40, dtype=np.float, **kw)
 
     # Stimulus settings
@@ -114,6 +114,7 @@ class ABRController(AbstractController):
     kw = dict(log=True, dtype=np.float32)
     primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
+    primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -125,7 +126,9 @@ class ABRController(AbstractController):
     extra_dtypes = [
         ('primary_sens', np.float32),
         ('primary_spl', np.float32),
-        ('primary_attenuation', np.float32)
+        ('primary_attenuation', np.float32),
+        ('primary_calibration_gain', np.float32),
+        ('total_repetitions', np.float32),
     ]
 
     search_gains = [-40, -60, -20, -30, -10, 0, 10]
@@ -135,7 +138,8 @@ class ABRController(AbstractController):
         log.debug('Calibrating primary speaker')
         self.primary_sens = tc.tone_calibration_search(
             frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+            callback=self.primary_calibration_gain_callback)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)
 
     def set_exp_mic_gain(self, exp_mic_gain):
@@ -191,6 +195,7 @@ class ABRController(AbstractController):
             input_line=ni.DAQmxDefaults.ERP_INPUT,
             pipeline=pipeline,
             fs=self.adc_fs,
+            expected_range=0.5,  # 10,000 gain
             complete_callback=self.trial_complete)
 
         iface_dac = ni.QueuedDAQmxPlayer(
@@ -248,10 +253,17 @@ class ABRController(AbstractController):
     def save_waveforms(self, waveforms):
         primary_sens = self.primary_sens.get_sens(
             self.get_current_value('frequency'))
-        self.log_trial(waveforms=waveforms, primary_sens=primary_sens,
-                       primary_spl=self.primary_spl, fs=self.adc_fs,
-                       primary_attenuation=self.primary_attenuation)
+        self.log_trial(waveforms=waveforms,
+                       primary_sens=primary_sens,
+                       primary_spl=self.primary_spl,
+                       fs=self.adc_fs,
+                       primary_attenuation=self.primary_attenuation,
+                       primary_calibration_gain=self.primary_calibration_gain,
+                       total_repetitions=self.current_repetitions,
+                       )
 
+    def primary_calibration_gain_callback(self, value):
+        self.primary_calibration_gain = value
 
 class ABRExperiment(AbstractExperiment):
 
@@ -318,6 +330,8 @@ class ABRExperiment(AbstractExperiment):
                     label='Paradigm',
                 ),
                 VGroup(
+                    Item('handler.primary_calibration_gain',
+                            style='readonly', format_str='%d'),
                     Item('handler.primary_spl', style='readonly',
                          format_str='%0.2f'),
                     Item('handler.primary_attenuation', style='readonly',
@@ -325,7 +339,9 @@ class ABRExperiment(AbstractExperiment):
                     Item('handler.current_repetitions', style='readonly',
                          label='Repetitions'),
                     Item('handler.current_valid_repetitions', style='readonly',
-                         label='Valid repetitions')
+                         label='Valid repetitions'),
+                    label='Diagnostics',
+                    show_border=True,
                 ),
                 show_border=True,
             ),
@@ -394,7 +410,6 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
 
-    #configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)

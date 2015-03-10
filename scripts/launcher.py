@@ -59,7 +59,7 @@ class ExperimentController(Controller):
     def run_dpoae_check(self, info):
         paradigm_dict = {
             'f2_frequency': 8e3,
-            'f2_level': 'exact_order(np.arange(30, 95, 10), c=1)'
+            'f2_level': 'exact_order(np.arange(40, 95, 10), c=1)'
         }
         dpoae_experiment.launch_gui(info.object.mic_cal,
                                     filename=None,

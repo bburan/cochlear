@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from distutils.core import setup
 
 setup(
@@ -9,5 +10,8 @@ setup(
     license='LICENSE.txt',
     description='Module for various auditory experiments',
     requires=['numpy'],
-    scripts=['scripts/merge_abr_files.py'],
+    scripts=[
+        'scripts/merge_abr_files.py',
+        'scripts/launcher.py',
+    ],
 )

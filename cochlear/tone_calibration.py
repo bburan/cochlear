@@ -130,10 +130,12 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
     return PointCalibration(frequency, output_sens)
 
 
-def tone_calibration_search(frequency, input_calibration, gains, vrms=1, *args,
-                            **kwargs):
+def tone_calibration_search(frequency, input_calibration, gains, vrms=1,
+                            callback=None, *args, **kwargs):
     for gain in gains:
         try:
+            if callback is not None:
+                callback(gain)
             return tone_calibration(frequency, input_calibration, gain, vrms,
                                     *args, **kwargs)
         except CalibrationError:

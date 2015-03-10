@@ -88,10 +88,11 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    f2_frequency = Expression( 'u(dp(2e3, 16e3, 1, response_window), f2_level)',
-                              label='f2 frequency (Hz)', **kw)
+    f2_frequency = Expression(
+        'u(dp(2.8e3, 32e3, 0.5, response_window), f2_level)',
+        label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(10, 95, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(10, label='DPOAE noise floor (dB SPL)', **kw)
 
@@ -109,8 +110,8 @@ class DPOAEParadigm(AbstractParadigm):
     # Signal acquisition settings.  Increasing time_averages increases SNR by
     # sqrt(N).  Increasing spectral averages reduces variance of result.  EPL
     # uses 8&4.
-    time_averages = Float(8, label='Time avg. (decr. noise floor)', **kw)
-    spectrum_averages = Float(4, label='Spectrum avg. (decr. variability)',
+    time_averages = Float(16, label='Time avg. (decr. noise floor)', **kw)
+    spectrum_averages = Float(2, label='Spectrum avg. (decr. variability)',
                               **kw)
 
     traits_view = View(
@@ -153,6 +154,8 @@ class DPOAEController(AbstractController):
     secondary_spl = Float(label='Secondary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
     secondary_attenuation = Float(label='Secondary attenuation (dB)', **kw)
+    primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
+    secondary_calibration_gain = Float(label='Secondary cal. gain (dB)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -182,6 +185,9 @@ class DPOAEController(AbstractController):
         ('secondary_spl', np.float32),
         ('primary_attenuation', np.float32),
         ('secondary_attenuation', np.float32),
+        ('primary_calibration_gain', np.float32),
+        ('secondary_calibration_gain', np.float32),
+        ('total_repetitions', np.float32),
     ]
 
     search_gains = [-40, -60, -20, -30, -10, 0, 10]
@@ -239,15 +245,19 @@ class DPOAEController(AbstractController):
             self.get_current_value('f1_frequency'))
         secondary_sens = self.secondary_sens.get_sens(
             self.get_current_value('f2_frequency'))
-        self.log_trial(waveforms=waveforms,
-                       fs=self.adc_fs,
-                       primary_sens=primary_sens,
-                       secondary_sens=secondary_sens,
-                       primary_spl=self.primary_spl,
-                       secondary_spl=self.secondary_spl,
-                       primary_attenuation=self.primary_attenuation,
-                       secondary_attenuation=self.secondary_attenuation,
-                       **results)
+        self.log_trial(
+            waveforms=waveforms,
+            fs=self.adc_fs,
+            primary_sens=primary_sens,
+            secondary_sens=secondary_sens,
+            primary_spl=self.primary_spl,
+            secondary_spl=self.secondary_spl,
+            primary_attenuation=self.primary_attenuation,
+            secondary_attenuation=self.secondary_attenuation,
+            primary_calibration_gain=self.primary_calibration_gain,
+            secondary_calibration_gain=self.secondary_calibration_gain,
+            total_repetitions=self.current_repetitions,
+            **results)
 
     def send(self, waveforms):
         self.waveforms.append(waveforms)
@@ -268,7 +278,8 @@ class DPOAEController(AbstractController):
         self.primary_sens = tc.tone_calibration_search(
             f1_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line)
+            input_line=self.mic_input_line,
+            callback=self.primary_calibration_gain_callback)
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
     @depends_on('exp_mic_gain')
@@ -277,7 +288,8 @@ class DPOAEController(AbstractController):
         self.secondary_sens = tc.tone_calibration_search(
             f2_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
             output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line)
+            input_line=self.mic_input_line,
+            callback=self.secondary_calibration_gain_callback)
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
@@ -371,6 +383,12 @@ class DPOAEController(AbstractController):
         self.iface_adc.start()
         log.debug('Starting DAC playout')
         self.iface_dac.play_queue()
+
+    def primary_calibration_gain_callback(self, value):
+        self.primary_calibration_gain = value
+
+    def secondary_calibration_gain_callback(self, value):
+        self.secondary_calibration_gain = value
 
 
 class DPOAEExperiment(AbstractExperiment):
@@ -522,6 +540,10 @@ class DPOAEExperiment(AbstractExperiment):
                         show_border=True,
                     ),
                     VGroup(
+                        Item('handler.primary_calibration_gain',
+                             style='readonly', format_str='%d'),
+                        Item('handler.secondary_calibration_gain',
+                             style='readonly', format_str='%d'),
                         Item('handler.primary_spl', style='readonly',
                              format_str='%0.2f'),
                         Item('handler.secondary_spl', style='readonly',
@@ -531,6 +553,7 @@ class DPOAEExperiment(AbstractExperiment):
                         Item('handler.secondary_attenuation', style='readonly',
                              format_str='%0.2f'),
                         show_border=True,
+                        label='Diagnostics',
                     ),
                 ),
             ),
@@ -595,14 +618,10 @@ if __name__ == '__main__':
     from neurogen.util import db
     import PyDAQmx as pyni
 
-    configure_logging('temp.log')
     pyni.DAQmxResetDevice('Dev1')
     mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
-
-    #c = FlatCalibration(db(2.703e-3))
-    #mic_input = ni.DAQmxDefaults.REF_MIC_INPUT
 
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
