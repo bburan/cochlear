@@ -31,7 +31,7 @@ class ExperimentController(Controller):
             date=datetime.strftime('%Y%m%d'),
             time=datetime.strftime('%H%M'),
             experiment=experiment)
-        return os.path.join(settings.DATA_DIR, 'animals', filename)
+        return os.path.join(settings.DATA_DIR, filename)
 
     def run_abr_experiment(self, info):
         filename = self._get_filename(info, 'ABR')
@@ -49,7 +49,6 @@ class ExperimentController(Controller):
                                   paradigm_dict=paradigm_dict,
                                   parent=info.ui.control,
                                   kind='livemodal')
-
 
     def run_dpoae_experiment(self, info):
         filename = self._get_filename(info, 'DPOAE')
