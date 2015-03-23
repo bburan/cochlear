@@ -44,14 +44,16 @@ class DAQmxDefaults(object):
     REF_MIC_INPUT = '/{}/ai2'.format(DEV)
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
-    AI_TRIGGER = '/{}/PFI1'.format(DEV)
+    AI_TRIGGER = '/{}/PFI0'.format(DEV)
     AI_RUN = None
     AI_RANGE = 10
 
-    # Must support hardware-timed DIO
+    # Digital output used to indicate start of trial. Must support
+    # hardware-timed DIO.
     AO_TRIGGER = '/{}/port0/line0'.format(DEV)
-    # Must support hardware-timed DIO
-    AO_RUN = '/{}/port0/line2'.format(DEV)
+    # Digital output used to indicate that a stimulus is being played out (will
+    # be high for full sequence of trials). Must support hardware-timed DIO.
+    AO_RUN = '/{}/port0/line1'.format(DEV)
 
     AO_RANGE = np.sqrt(2)
     DUAL_SPEAKER_OUTPUT = '/{}/ao0:1'.format(DEV)
@@ -150,7 +152,7 @@ def create_continuous_ai(ai, fs, expected_range=10, callback=None,
     if task_analog is None:
         task_analog = create_task()
     vlb, vub = -expected_range, expected_range
-    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, vlb, vub,
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb, vub,
                                 ni.DAQmx_Val_Volts, '')
     ni.DAQmxCfgSampClkTiming(task_analog, None, fs, ni.DAQmx_Val_Rising,
                              ni.DAQmx_Val_ContSamps, 0)
@@ -165,7 +167,8 @@ def create_continuous_ai(ai, fs, expected_range=10, callback=None,
 
 
 def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
-                            counter=None, run=None, callback=None,
+                            counter=None, run=None,
+                            record_mode=ni.DAQmx_Val_Diff, callback=None,
                             task_analog=None, task_record=None,
                             trigger_duration=DAQmxDefaults.TRIGGER_DURATION):
     '''
@@ -191,6 +194,7 @@ def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
     task_record : {None, niDAQmx task}
         Task to use for controlling record counter.  If None, a new task
         will be created.
+    record_mode : pass
 
     Returns
     -------
@@ -236,8 +240,8 @@ def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
     # acquire when the counter is active.  Since the counter only runs for a
     # finite number of samples after each trigger, this is effectively a
     # triggered
-    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_RSE, vlb, vub,
-                                ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb,
+                                vub, ni.DAQmx_Val_Volts, '')
     ni.DAQmxCfgSampClkTiming(task_analog, counter+'InternalOutput', fs,
                              ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
                              epoch_size)
@@ -480,6 +484,11 @@ class DAQmxSource(DAQmxBase):
     '''
     Read data from device
     '''
+
+    DIFF = ni.DAQmx_Val_Diff
+    NRSE = ni.DAQmx_Val_NRSE
+    RSE = ni.DAQmx_Val_RSE
+
     def read_analog(self, timeout=None):
         if timeout is None:
             timeout = 0
@@ -565,7 +574,7 @@ class TriggeredDAQmxSource(DAQmxSource):
                  run_line=DAQmxDefaults.AI_RUN,
                  trigger_duration=DAQmxDefaults.TRIGGER_DURATION,
                  trigger_delay=0, callback=None, pipeline=None,
-                 complete_callback=None):
+                 complete_callback=None, record_mode=DAQmxSource.DIFF):
         '''
         Parameters
         ----------
@@ -602,7 +611,7 @@ class TriggeredDAQmxSource(DAQmxSource):
             create_retriggerable_ai(self.input_line, self.fs, self.epoch_size,
                                     self.trigger_line, self.expected_range,
                                     self.counter_line, self.run_line,
-                                    self.trigger_callback)
+                                    self.record_mode, self.trigger_callback)
         self._tasks.extend((self._task_analog, self._task_digital))
         self.channels = num_channels(self._task_analog)
         log.debug('Configured retriggerable AI with %d channels', self.channels)
@@ -1043,7 +1052,7 @@ class DAQmxAcquire(object):
 
     def __init__(self, channels, repetitions, output_line, input_line, gain,
                  dac_fs=100e3, adc_fs=100e3, duration=1, iti=0.01,
-                 callback=None, waveform_buffer=None):
+                 input_range=10, callback=None, waveform_buffer=None):
 
         log.debug('Setting up acquisition')
         for k, v in locals().items():
@@ -1057,6 +1066,7 @@ class DAQmxAcquire(object):
         self.iface_adc = TriggeredDAQmxSource(fs=adc_fs,
                                               epoch_duration=duration,
                                               input_line=input_line,
+                                              expected_range=input_range,
                                               callback=self.poll)
         self.iface_adc.start()
 
