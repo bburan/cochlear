@@ -65,6 +65,7 @@ class ABRParadigm(AbstractParadigm):
 
     # Stimulus settings
     repetition_rate = Expression(20, dtype=np.float, **kw)
+    repetition_jitter = Expression(0, dtype=np.float, **kw)
     frequency = Expression(8e3, dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
@@ -85,6 +86,7 @@ class ABRParadigm(AbstractParadigm):
                 'duration',
                 'ramp_duration',
                 'repetition_rate',
+                Item('repetition_jitter', label='Jitter in rep. rate (frac)'),
                 'level',
                 label='Stimulus settings',
                 show_border=True,
@@ -168,6 +170,7 @@ class ABRController(AbstractController):
         level = self.get_current_value('level')
         duration = self.get_current_value('duration')
         ramp_duration = self.get_current_value('ramp_duration')
+        repetition_jitter = self.get_current_value('repetition_jitter')
 
         token = Tone(name='tone', frequency=frequency, level=level) >> \
             Cos2Envelope(rise_time=ramp_duration, duration=duration)
@@ -190,13 +193,16 @@ class ABRController(AbstractController):
         iface_atten = ni.DAQmxAttenControl()
         iface_atten.setup()
 
+        print ni.DAQmxDefaults.ERP_INPUT
         iface_adc = ni.TriggeredDAQmxSource(
             epoch_duration=epoch_duration,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
             pipeline=pipeline,
             fs=self.adc_fs,
-            expected_range=0.5,  # 10,000 gain
-            complete_callback=self.trial_complete)
+            expected_range=10,  # 10,000 gain
+            complete_callback=self.trial_complete,
+            record_mode=ni.DAQmxSource.DIFF,
+        )
 
         iface_dac = ni.QueuedDAQmxPlayer(
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
@@ -213,9 +219,12 @@ class ABRController(AbstractController):
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
+        delay_func = lambda: np.random.uniform(low=0, high=repetition_jitter)
         iface_dac.queue_init('Interleaved FIFO')
-        iface_dac.queue_append(np.inf, values={'primary.tone.phase': 0})
-        iface_dac.queue_append(np.inf, values={'primary.tone.phase': np.pi})
+        iface_dac.queue_append(np.inf, values={'primary.tone.phase': 0},
+                               delays=delay_func)
+        iface_dac.queue_append(np.inf, values={'primary.tone.phase': np.pi},
+                               delays=delay_func)
 
         self.waveforms = []
         self.to_acquire = averages
@@ -264,6 +273,7 @@ class ABRController(AbstractController):
 
     def primary_calibration_gain_callback(self, value):
         self.primary_calibration_gain = value
+
 
 class ABRExperiment(AbstractExperiment):
 
