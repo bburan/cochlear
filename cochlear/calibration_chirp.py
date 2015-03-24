@@ -2,39 +2,28 @@ from __future__ import division
 
 import shutil
 
-import numpy as np
-
-from traits.api import (Float, Int, Property, Any, Bool, Enum)
-from traitsui.api import View, Item, VGroup, Include
-from enable.api import Component, ComponentEditor
-from chaco.api import (DataRange1D, VPlotContainer, PlotAxis, create_line_plot,
-                       LogMapper, OverlayPlotContainer)
-
-from experiment import (icon_dir, AbstractController, AbstractParadigm)
-from experiment.util import get_save_file
-
-from neurogen import block_definitions as blocks
-from neurogen.calibration import InterpCalibration, FlatCalibration
-from neurogen.util import patodb, db
-
 import os.path
-import shutil
-
 import numpy as np
 import tables
 
-from traits.api import (HasTraits, Float, Instance, Any, Property)
-from traitsui.api import View, Item, VGroup, ToolBar, Action, HSplit
 from pyface.api import ImageResource
+from traits.api import (Float, Int, Property, Any, Bool, Enum, HasTraits,
+                        Instance)
+from traitsui.api import (View, Item, VGroup, Include, ToolBar, HSplit)
+from traitsui.menu import MenuBar, Menu, ActionGroup, Action
 from enable.api import Component, ComponentEditor
 from chaco.api import (DataRange1D, VPlotContainer, PlotAxis, create_line_plot,
                        LogMapper, OverlayPlotContainer)
+from chaco.tools.api import PanTool, BetterSelectingZoom
 
-from experiment import (icon_dir, AbstractData)
-from experiment.channel import FileFilteredEpochChannel
+from experiment import (icon_dir, AbstractController, AbstractParadigm,
+                        AbstractData)
 from experiment.util import get_save_file
+from experiment.channel import FileFilteredEpochChannel
 
-from neurogen.util import db, dbi
+from neurogen import block_definitions as blocks
+from neurogen.calibration import InterpCalibration, FlatCalibration
+from neurogen.util import db
 
 from cochlear import nidaqmx as ni
 from cochlear import tone_calibration as tc
@@ -74,8 +63,10 @@ class ChirpCalSettings(AbstractParadigm):
 
     ref_mic_sens_mv = Float(2.703, label='Ref. mic. sens. (mV/Pa)', **kw)
     ref_mic_gain = Float(0, label='Ref. mic. gain (dB)', **kw)
-    ref_mic_sens = Property(depends_on='ref_mic_sens_mv', **kw)
+    ref_mic_sens = Property(depends_on='ref_mic_sens_mv',
+                            label='Ref. mic. sens. dB(mV/Pa)', **kw)
     exp_mic_gain = Float(20, label='Exp. mic. gain (dB)', **kw)
+    exp_range = Float(1, label='Expected input range (Vpp)', **kw)
 
     averages = Property(depends_on='fft_averages, waveform_averages',
                         label='Number of chirps', **kw)
@@ -86,6 +77,7 @@ class ChirpCalSettings(AbstractParadigm):
 
     def _get_ref_mic_sens(self):
         return self.ref_mic_sens_mv*1e-3
+
     def _get_duration(self):
         return 1/self.freq_resolution
 
@@ -94,7 +86,6 @@ class ChirpCalSettings(AbstractParadigm):
 
     def _get_averages(self):
         return self.fft_averages*self.waveform_averages
-
 
     output_settings = VGroup(
         'output',
@@ -108,6 +99,7 @@ class ChirpCalSettings(AbstractParadigm):
         'ref_mic_sens_mv',
         'ref_mic_gain',
         'exp_mic_gain',
+        'exp_range',
         label='Microphone settings',
         show_border=True,
     )
@@ -147,7 +139,7 @@ class ChirpCalData(AbstractData):
 
     @classmethod
     def from_node(cls, node):
-        obj = ReferenceChirpCalData()
+        obj = ChirpCalData()
         exp_node = node.exp_microphone
         ref_node = node.ref_microphone
         obj.exp_microphone = FileFilteredEpochChannel.from_node(exp_node)
@@ -158,8 +150,11 @@ class ChirpCalData(AbstractData):
     def _create_microphone_nodes(self, fs, epoch_duration):
         if 'exp_microphone' in self.fh.root:
             self.fh.root.exp_microphone.remove()
+        if 'exp_microphone_ts' in self.fh.root:
             self.fh.root.exp_microphone_ts.remove()
+        if 'ref_microphone' in self.fh.root:
             self.fh.root.ref_microphone.remove()
+        if 'ref_microphone_ts' in self.fh.root:
             self.fh.root.ref_microphone_ts.remove()
         fh = self.store_node._v_file
         filter_kw = dict(filter_freq_hp=5, filter_freq_lp=80e3,
@@ -188,7 +183,6 @@ class ChirpCalData(AbstractData):
 
         self.time = np.arange(len(waveform))/waveform_fs
         self.waveform = waveform
-        print ref_mic_sens, ref_mic_gain, exp_mic_gain
 
         # All functions are computed using these frequencies
         self.frequency = self.ref_microphone.get_fftfreq()
@@ -205,9 +199,6 @@ class ChirpCalData(AbstractData):
         # Convert to dB re 1V and compensate for measurement gain settings
         self.ref_mic_psd = db(ref_psd.mean(axis=0))-ref_mic_gain
         self.exp_mic_psd = db(exp_psd.mean(axis=0))-exp_mic_gain
-        print self.ref_mic_psd.shape
-        print self.exp_mic_psd.shape
-        print self.frequency.shape
 
         # Sensitivity of experiment microphone as function of frequency
         # expressed as Vrms (dB re Pa).  This is equivalent to
@@ -226,14 +217,14 @@ class ChirpCal(HasTraits):
 
     paradigm = Instance(ChirpCalSettings, ())
     data = Instance(ChirpCalData)
-    container = Instance(Component)
+    container = Instance(Component, None, {'bgcolor': 'transparent'})
 
     def generate_plots(self):
-        container = VPlotContainer(padding=70, spacing=70)
-
+        container = VPlotContainer(padding=70, spacing=40,
+                                   bgcolor='transparent')
 
         plot = create_line_plot((self.data.time, self.data.waveform),
-                                color='black')
+                                color='black', bgcolor='white')
         axis = PlotAxis(component=plot, orientation='left',
                         title="Cal. sig. (V)")
         plot.underlays.append(axis)
@@ -287,12 +278,20 @@ class ChirpCal(HasTraits):
         axis = PlotAxis(component=ref_plot, orientation='left',
                         title='Ref. mic. (dB re V)')
         ref_plot.underlays.append(axis)
+
+        zoom = BetterSelectingZoom(component=exp_plot, tool_mode='range',
+                                   always_on=True, axis='index')
+        exp_plot.underlays.append(zoom)
+        pan = PanTool(component=exp_plot, axis='index')
+        exp_plot.tools.append(pan)
+
         overlay = OverlayPlotContainer(ref_plot, exp_plot)
         container.insert(0, overlay)
 
         # Convert to dB re mV
         exp_mic_sens_db = self.data.exp_mic_sens[1:]
-        plot = create_line_plot((frequency, exp_mic_sens_db), color='red')
+        plot = create_line_plot((frequency, exp_mic_sens_db), color='red',
+                                bgcolor='white')
         plot.index_mapper = index_mapper
         axis = PlotAxis(component=plot, orientation='left',
                         title="PT sens V (dB re Pa)")
@@ -339,6 +338,15 @@ class ChirpCal(HasTraits):
                    enabled_when='handler.complete')
         ),
         resizable=True,
+        menubar=MenuBar(
+            Menu(
+                ActionGroup(
+                    Action(name='Load settings', action='load_settings'),
+                    Action(name='Save settings', action='save_settings'),
+                ),
+                name='&Settings',
+            ),
+        ),
     )
 
 
@@ -360,19 +368,21 @@ class ChirpCalController(AbstractController):
             shutil.copy(self.filename, filename)
 
     def start(self, info=None):
-        self.complete = False
-        self.state = 'running'
-        self.epochs_acquired = 0
-        self.complete = False
-        self.calibration_accepted = False
-        if self.fh is not None:
-            self.fh.close()
-
-        self.initialize_context()
-        self.refresh_context()
-        self._setup_input()
-        self._setup_output()
-        self.iface_dac.play_queue()
+        try:
+            self.complete = False
+            self.epochs_acquired = 0
+            self.complete = False
+            self.calibration_accepted = False
+            if self.fh is not None:
+                self.fh.close()
+            self.initialize_context()
+            self.refresh_context()
+            self._setup_input()
+            self._setup_output()
+            self.iface_dac.play_queue()
+            self.state = 'running'
+        except:
+            self.stop(info)
 
     def stop(self, info=None):
         self.state = 'halted'
@@ -391,9 +401,11 @@ class ChirpCalController(AbstractController):
         mic_input = '{}, {}'.format(ni.DAQmxDefaults.MIC_INPUT,
                                     ni.DAQmxDefaults.REF_MIC_INPUT)
         epoch_duration = self.get_current_value('duration')
+        exp_range = self.get_current_value('exp_range')
         self.iface_adc = ni.TriggeredDAQmxSource(
             fs=self.adc_fs, epoch_duration=epoch_duration, input_line=mic_input,
-            callback=self.poll, trigger_duration=10e-3, expected_range=1.0)
+            callback=self.poll, trigger_duration=10e-3,
+            expected_range=exp_range)
         self.model.data._create_microphone_nodes(self.adc_fs, epoch_duration)
         self.iface_adc.setup()
         self.iface_adc.start()
@@ -470,7 +482,6 @@ class ChirpCalController(AbstractController):
         ref_sens = self.get_current_value('ref_mic_sens')
         exp_gain = self.get_current_value('exp_mic_gain')
         ref_gain = self.get_current_value('ref_mic_gain')
-        print ref_sens
 
         exp_cal = InterpCalibration(frequency, exp_sens, fixed_gain=-exp_gain)
         ref_cal = FlatCalibration(db(ref_sens), fixed_gain=-ref_gain)
@@ -488,6 +499,14 @@ class ChirpCalController(AbstractController):
                 print f,
                 print sr_cal._sensitivity,
                 print se_cal._sensitivity
+
+    def save_settings(self, info=None):
+        self.save_paradigm(settings.SETTINGS_DIR,
+                           'Tone calibration settings (*.tc_par)|*.tc_par')
+
+    def load_settings(self, info=None):
+        self.load_paradigm(settings.SETTINGS_DIR,
+                           'Tone calibration settings (*.tc_par)|*.tc_par')
 
 
 def launch_gui(output='ao0', **kwargs):
