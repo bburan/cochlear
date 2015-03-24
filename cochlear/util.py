@@ -3,8 +3,10 @@ import os.path
 import tables
 import numpy as np
 
+from neurogen.calibration import InterpCalibration
 
-def merge_abr_files(filenames, new_filename):
+
+def merge_files(filenames, new_filename):
     if os.path.exists(new_filename):
         raise IOError('Output file already exists')
     with tables.open_file(new_filename, 'w') as fh_new:
@@ -25,3 +27,12 @@ def merge_abr_files(filenames, new_filename):
         w_node = fh_new.create_array('/', 'waveforms', waveforms)
         w_node._v_attrs['fs'] = fs[0]
 
+
+def get_chirp_transform(vrms, start_atten=6, end_atten=-6):
+    calibration_data = np.array([
+        (0, start_atten),
+        (100e3, end_atten),
+    ])
+    frequencies = calibration_data[:, 0]
+    magnitude = calibration_data[:, 1]
+    return InterpCalibration.from_single_vrms(frequencies, magnitude, vrms)
