@@ -23,6 +23,7 @@ from experiment.channel import FileFilteredEpochChannel
 
 from neurogen import block_definitions as blocks
 from neurogen.calibration import InterpCalibration, FlatCalibration
+from neurogen.calibration.util import psd, psd_freq
 from neurogen.util import db
 
 from cochlear import nidaqmx as ni
@@ -55,8 +56,8 @@ class ChirpCalSettings(AbstractParadigm):
     freq_lb = Float(0.5e3, label='Start frequency (Hz)', **kw)
     freq_ub = Float(50e3, label='End frequency (Hz)', **kw)
     freq_resolution = Float(50, label='Frequency resolution (Hz)')
-    fft_averages = Int(8, label='Number of FFTs', **kw)
-    waveform_averages = Int(8, label='Number of chirps per FFT', **kw)
+    fft_averages = Int(4, label='Number of FFTs', **kw)
+    waveform_averages = Int(4, label='Number of chirps per FFT', **kw)
     ici = Float(0.01, label='Inter-chirp interval', **kw)
     start_attenuation = Float(30, label='Start attenuation (dB)', **kw)
     end_attenuation = Float(-30, label='End attenuation (dB)', **kw)
@@ -181,22 +182,22 @@ class ChirpCalData(AbstractData):
                                    ref_mic_gain, exp_mic_gain,
                                    waveform_averages):
 
+        fft_window = 'boxcar'
         self.time = np.arange(len(waveform))/waveform_fs
         self.waveform = waveform
 
         # All functions are computed using these frequencies
         self.frequency = self.ref_microphone.get_fftfreq()
 
-        from neurogen.calibration.util import psd_freq, psd
-        # Compute the PSD of each microphone in Vrms
+        # Get frequencies
         self.frequency = psd_freq(self.ref_microphone[:],
                                   self.ref_microphone.fs)
 
-        args = 'boxcar', waveform_averages
+        # Compute PSD of microphone signals, convert to dB re 1V and compensate
+        # for measurement gain settings
+        args = fft_window, waveform_averages
         ref_psd = psd(self.ref_microphone[:], self.ref_microphone.fs, *args)
         exp_psd = psd(self.exp_microphone[:], self.exp_microphone.fs, *args)
-
-        # Convert to dB re 1V and compensate for measurement gain settings
         self.ref_mic_psd = db(ref_psd.mean(axis=0))-ref_mic_gain
         self.exp_mic_psd = db(exp_psd.mean(axis=0))-exp_mic_gain
 
@@ -205,10 +206,19 @@ class ChirpCalData(AbstractData):
         # (Vprobe/Vcal)/Ccal
         self.exp_mic_sens = self.exp_mic_psd+db(ref_mic_sens)-self.ref_mic_psd
 
+        # Actual output of speaker
+        self.speaker_spl = self.ref_mic_psd-db(ref_mic_sens)-db(20e-6)
+
+        # Actual power in signal
+        self.sig_frequency = psd_freq(waveform, waveform_fs)
+        self.sig_psd = psd(waveform, waveform_fs, window=fft_window)
+
+        # Save the data in the HDF5 file
         self._create_array('frequency', self.frequency)
         self._create_array('ref_psd_rms', self.ref_mic_psd)
         self._create_array('exp_psd_rms', self.exp_mic_psd)
         self._create_array('exp_mic_sens', self.exp_mic_sens)
+        self._create_array('speaker_spl', self.speaker_spl)
         self._create_array('time', self.time)
         self._create_array('waveform', self.waveform)
 
@@ -272,18 +282,15 @@ class ChirpCal(HasTraits):
         axis = PlotAxis(component=exp_plot, orientation='bottom',
                         title='Frequency (Hz)')
         exp_plot.underlays.append(axis)
-        axis = PlotAxis(component=exp_plot, orientation='right',
-                        title='Exp. mic. (dB re V)')
+        axis = PlotAxis(component=exp_plot, orientation='left',
+                        title='Mic. PSD (dB re V)')
         exp_plot.underlays.append(axis)
-        axis = PlotAxis(component=ref_plot, orientation='left',
-                        title='Ref. mic. (dB re V)')
-        ref_plot.underlays.append(axis)
-
         zoom = BetterSelectingZoom(component=exp_plot, tool_mode='range',
                                    always_on=True, axis='index')
         exp_plot.underlays.append(zoom)
         pan = PanTool(component=exp_plot, axis='index')
         exp_plot.tools.append(pan)
+        ref_plot.value_mapper = exp_plot.value_mapper
 
         overlay = OverlayPlotContainer(ref_plot, exp_plot)
         container.insert(0, overlay)
@@ -294,13 +301,34 @@ class ChirpCal(HasTraits):
                                 bgcolor='white')
         plot.index_mapper = index_mapper
         axis = PlotAxis(component=plot, orientation='left',
-                        title="PT sens V (dB re Pa)")
+                        title="Exp. mic. sens. V (dB re Pa)")
         plot.underlays.append(axis)
         axis = PlotAxis(component=plot, orientation='bottom',
                         title="Frequency (Hz)")
         plot.underlays.append(axis)
-
         container.insert(0, plot)
+
+        # Plot the speaker output
+        speaker_spl = self.data.speaker_spl[1:]
+        spl_plot = create_line_plot((frequency, speaker_spl), color='black',
+                                    bgcolor='white')
+        spl_plot.index_mapper = index_mapper
+        axis = PlotAxis(component=spl_plot, orientation='left',
+                        title="Speaker output (dB SPL)")
+        spl_plot.underlays.append(axis)
+        axis = PlotAxis(component=spl_plot, orientation='bottom',
+                        title="Frequency (Hz)")
+        spl_plot.underlays.append(axis)
+
+        sig_psd = self.data.sig_psd[1:]
+        sig_frequency = self.data.sig_frequency[1:]
+        sig_plot = create_line_plot((sig_frequency, sig_psd), color='blue',
+                                    bgcolor='white')
+        sig_plot.index_mapper = index_mapper
+
+        overlay = OverlayPlotContainer(spl_plot, sig_plot)
+        container.insert(0, overlay)
+
         self.container = container
 
     traits_view = View(
@@ -456,15 +484,17 @@ class ChirpCalController(AbstractController):
         self.iface_att.set_mute(False)
 
     def finalize(self):
-        waveform_fs, waveform = \
-            self.iface_dac.fs, self.iface_dac.realize().ravel()
-
+        # This is the chirp waveform
+        waveform = self.iface_dac.realize().ravel()
+        waveform_fs = self.iface_dac.fs
         ref_mic_sens = self.get_current_value('ref_mic_sens')
         ref_mic_gain = self.get_current_value('ref_mic_gain')
         exp_mic_gain = self.get_current_value('exp_mic_gain')
         waveform_averages = self.get_current_value('waveform_averages')
-        self.model.data.compute_transfer_functions(waveform_fs, waveform,
-                                                   ref_mic_sens, ref_mic_gain,
+        self.model.data.compute_transfer_functions(waveform_fs,
+                                                   waveform,
+                                                   ref_mic_sens,
+                                                   ref_mic_gain,
                                                    exp_mic_gain,
                                                    waveform_averages)
         self.model.data.save(**dict(self.model.paradigm.items()))
@@ -482,7 +512,6 @@ class ChirpCalController(AbstractController):
         ref_sens = self.get_current_value('ref_mic_sens')
         exp_gain = self.get_current_value('exp_mic_gain')
         ref_gain = self.get_current_value('ref_mic_gain')
-
         exp_cal = InterpCalibration(frequency, exp_sens, fixed_gain=-exp_gain)
         ref_cal = FlatCalibration(db(ref_sens), fixed_gain=-ref_gain)
         exp_input = ni.DAQmxDefaults.MIC_INPUT
@@ -490,7 +519,6 @@ class ChirpCalController(AbstractController):
 
         gains = [-80, -60, -40, -20, 0, 10]
         for f in (1e3, 2e3, 4e3, 8e3, 16e3):
-
             sr_cal = tc.tone_calibration_search(f, exp_cal, gains=gains,
                                                 input_line=exp_input)
             se_cal = tc.tone_calibration_search(f, ref_cal, gains=gains,
@@ -520,11 +548,10 @@ def launch_gui(output='ao0', **kwargs):
 
 
 if __name__ == '__main__':
-    output = 'ao0'
     tempfile = os.path.join(settings.TEMP_DIR, 'temp_mic.cal')
     with tables.open_file(tempfile, 'w') as fh:
         data = ChirpCalData(store_node=fh.root)
         controller = ChirpCalController(filename=tempfile)
-        paradigm = ChirpCalSettings(output=output)
+        paradigm = ChirpCalSettings(output='ao0')
         ChirpCal(data=data, paradigm=paradigm) \
             .configure_traits(handler=controller)
