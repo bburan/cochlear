@@ -6,7 +6,7 @@ from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
 
 from enable.api import Component, ComponentEditor
-from pyface.api import ImageResource
+from pyface.api import ImageResource, error
 from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
                        LogMapper, ArrayPlotData, Plot, HPlotContainer)
 
@@ -94,15 +94,13 @@ class DPOAEParadigm(AbstractParadigm):
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
     f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
-    dpoae_noise_floor = Expression(10, label='DPOAE noise floor (dB SPL)', **kw)
+    dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
 
     probe_duration = Expression('response_window+response_offset*2',
                                 label='Probe duration (s)', **kw)
-    ramp_duration = Expression(5e-3, label='Ramp duration (s)', **kw)
-
-    response_window = Expression(100e-3, label='Response window (s)', **kw)
-    response_offset = Expression('ramp_duration*4', label='Response offset (s)',
-                                 **kw)
+    ramp_duration = Expression('10e-3', label='Ramp duration (s)', **kw)
+    response_window = Expression('50e-3', label='Response window (s)', **kw)
+    response_offset = Expression('50e-3', label='Response offset (s)', **kw)
 
     iti = Expression(0.01, label='Intertrial interval (s)', **kw)
     exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
@@ -157,6 +155,9 @@ class DPOAEController(AbstractController):
     primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
     secondary_calibration_gain = Float(label='Secondary cal. gain (dB)', **kw)
 
+    primary_range = Float(label='Exp. mic. V for primary (mVpp)', **kw)
+    secondary_range = Float(label='Exp. mic. V for secondary (mVpp)', **kw)
+
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
 
@@ -172,6 +173,7 @@ class DPOAEController(AbstractController):
         'dp': dp_freq,
     }
 
+    # Extra columns to add to the trial log.
     extra_dtypes = [
         ('measured_f1_spl', np.float32),
         ('measured_f2_spl', np.float32),
@@ -190,7 +192,7 @@ class DPOAEController(AbstractController):
         ('total_repetitions', np.float32),
     ]
 
-    search_gains = [-40, -60, -20, -30, -10, 0, 10]
+    search_gains = [-40, -60, -20]
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
 
@@ -198,10 +200,11 @@ class DPOAEController(AbstractController):
         self.current_repetitions = repetitions
 
     def stop_experiment(self, info=None):
-        self.iface_dac.clear()
-        self.iface_adc.clear()
-        self.iface_atten.clear()
-        self.model.data.save()
+        if self.iface_dac is not None:
+            self.iface_dac.clear()
+            self.iface_adc.clear()
+            self.iface_atten.clear()
+            self.model.data.save()
 
     def trial_complete(self):
         self.iface_dac.stop()
@@ -282,6 +285,11 @@ class DPOAEController(AbstractController):
             callback=self.primary_calibration_gain_callback)
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
 
+    def set_f1_level(self, f1_level):
+        f1_frequency = self.get_current_value('f1_frequency')
+        self.primary_range = \
+            self.mic_cal.get_sf(f1_frequency, f1_level)*np.sqrt(2)*1e3
+
     @depends_on('exp_mic_gain')
     def set_f2_frequency(self, f2_frequency):
         log.debug('Calibrating secondary speaker')
@@ -293,11 +301,20 @@ class DPOAEController(AbstractController):
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
-    def next_trial(self):
+    def set_f2_level(self, f2_level):
+        f2_frequency = self.get_current_value('f2_frequency')
+        self.secondary_range = \
+            self.mic_cal.get_sf(f2_frequency, f2_level)*np.sqrt(2)*1e3
+
+    def next_trial(self, info=None):
         try:
             log.debug('Preparing next trial')
             self.refresh_context(evaluate=True)
         except StopIteration:
+            self.stop()
+            return
+        except Exception as e:
+            error(None, str(e))
             self.stop()
             return
 
@@ -354,7 +371,9 @@ class DPOAEController(AbstractController):
             epoch_duration=response_window,
             trigger_delay=response_offset,
             pipeline=pipeline,
-            complete_callback=self.trial_complete)
+            complete_callback=self.trial_complete,
+            expected_range=5,
+        )
 
         # Ordering is important.  First channel is sent to ao0, second channel
         # to ao1.  The left attenuator channel controls ao0, right attenuator
@@ -552,6 +571,10 @@ class DPOAEExperiment(AbstractExperiment):
                              format_str='%0.2f'),
                         Item('handler.secondary_attenuation', style='readonly',
                              format_str='%0.2f'),
+                        Item('handler.primary_range', style='readonly',
+                             format_str='%0.2f'),
+                        Item('handler.secondary_range', style='readonly',
+                             format_str='%0.2f'),
                         show_border=True,
                         label='Diagnostics',
                     ),
@@ -592,6 +615,15 @@ class DPOAEExperiment(AbstractExperiment):
                    image=ImageResource('media_skip_forward', icon_dir),
                    enabled_when='handler.state=="running"'),
         ),
+        menubar=MenuBar(
+            Menu(
+                ActionGroup(
+                    Action(name='Load settings', action='load_paradigm'),
+                    Action(name='Save settings', action='save_paradigm'),
+                ),
+                name='&Settings',
+            ),
+        ),
         id='lbhb.DPOAEExperiment',
     )
 
@@ -617,9 +649,10 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration, FlatCalibration
     from neurogen.util import db
     import PyDAQmx as pyni
+    configure_logging()
 
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
+    mic_file = 'c:/data/cochlear/calibration/150325 - mic calibration with better chassis grounding.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
 
