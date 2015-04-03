@@ -22,7 +22,7 @@ from chaco.tools.api import ZoomTool
 from pyface.api import confirm, YES
 from pyface.timer.api import Timer
 
-from cns.util import to_list
+#from cns.util import to_list
 
 from experiment.plots.tools.window_tool import WindowTool
 from experiment.plots.helpers import add_time_axis
@@ -44,7 +44,7 @@ from experiment.channel import FileEpochChannel as FileSnippetChannel
 
 from experiment.util import load_instance, dump_instance
 
-from traitsui.menu import MenuBar, Menu, ActionGroup, Action)
+from traitsui.menu import MenuBar, Menu, ActionGroup, Action
 
 CHANNELS = 5
 #PHYSIOLOGY_WILDCARD = get_config('PHYSIOLOGY_WILDCARD')
@@ -144,9 +144,8 @@ class PhysiologyController(Controller):
         #self.process.stop()
         self.buffer_raw.clear()
 
-    def monitor_physiology(self):
+    def monitor_physiology(self, waveform):
         # Acquire raw physiology data
-        waveform = self.buffer_raw.read_analog()
         self.model.data.raw.send(waveform)
         self.model.data.processed.send(waveform)
 
@@ -544,6 +543,7 @@ class PhysiologyParadigm(HasTraits):
 
     @cached_property
     def _get_diff_matrix(self):
+        pass
         n_chan = len(self.channel_settings)
         map = np.zeros((n_chan, n_chan))
         for channel in self.channel_settings:
