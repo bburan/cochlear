@@ -140,6 +140,8 @@ def tone_calibration_search(frequency, input_calibration, gains, vrms=1,
                                     *args, **kwargs)
         except CalibrationError:
             pass
+    else:
+        raise SystemError('Could not calibrate speaker')
 
 
 def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
