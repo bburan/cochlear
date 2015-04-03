@@ -11,6 +11,7 @@ from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
                        LogMapper, ArrayPlotData, Plot, HPlotContainer)
 
 import numpy as np
+from scipy import signal
 
 from neurogen.util import db
 from neurogen import block_definitions as blocks
@@ -18,10 +19,9 @@ from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
 from cochlear import nidaqmx as ni
 from cochlear import tone_calibration as tc
 
-
 from experiment import (AbstractParadigm, Expression, AbstractData,
                         AbstractController, AbstractExperiment, depends_on)
-from experiment.coroutine import coroutine, blocked, counter
+from experiment.coroutine import coroutine, blocked, counter, reshape
 from experiment.evaluate import choice, expr
 
 import tables
@@ -60,6 +60,7 @@ def dpoae_reject(fs, dpoae, mic_cal, noise_floor, target):
         data = raw_data.mean(axis=0)[0]
         nf_rms, dp_rms = tone_power_conv_nf(data, fs, dpoae)
         nf_spl, dp_spl = mic_cal.get_spl(dpoae, [nf_rms, dp_rms])
+        log.debug('DPOAE reject: DPOAE %.2f, noise floor %.2f', dp_spl, nf_spl)
         if (nf_spl < noise_floor) or (nf_spl < dp_spl):
             target.send(raw_data)
 
@@ -88,19 +89,16 @@ class DPOAEParadigm(AbstractParadigm):
                                  label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    f2_frequency = Expression(
-        'u(dp(2.8e3, 32e3, 0.5, response_window), f2_level)',
-        label='f2 frequency (Hz)', **kw)
+    #f2_frequency = Expression(
+    #    'u(dp(2.8e3, 32e3, 0.5, response_window), f2_level)',
+    #    label='f2 frequency (Hz)', **kw)
+    f2_frequency = Expression(8e3, label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(50, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
 
-    probe_duration = Expression('response_window+response_offset*2',
-                                label='Probe duration (s)', **kw)
-    ramp_duration = Expression('10e-3', label='Ramp duration (s)', **kw)
     response_window = Expression('50e-3', label='Response window (s)', **kw)
-    response_offset = Expression('50e-3', label='Response offset (s)', **kw)
 
     iti = Expression(0.01, label='Intertrial interval (s)', **kw)
     exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
@@ -118,8 +116,6 @@ class DPOAEParadigm(AbstractParadigm):
                 'time_averages',
                 'spectrum_averages',
                 'dpoae_noise_floor',
-                'probe_duration',
-                'response_offset',
                 'response_window',
                 'exp_mic_gain',
                 label='Acquisition settings',
@@ -131,7 +127,6 @@ class DPOAEParadigm(AbstractParadigm):
                 'dpoae_frequency',
                 'f1_level',
                 'f2_level',
-                'ramp_duration',
                 label='Stimulus settings',
                 show_border=True,
             ),
@@ -144,8 +139,8 @@ class DPOAEController(AbstractController):
     mic_cal = Instance('neurogen.calibration.Calibration')
     primary_sens = Instance('neurogen.calibration.PointCalibration')
     secondary_sens = Instance('neurogen.calibration.PointCalibration')
-    iface_adc = Instance('cochlear.nidaqmx.TriggeredDAQmxSource')
-    iface_dac = Instance('cochlear.nidaqmx.QueuedDAQmxPlayer')
+    iface_adc = Instance('cochlear.nidaqmx.DAQmxSource')
+    iface_dac = Instance('cochlear.nidaqmx.ContinuousDAQmxPlayer')
 
     kw = dict(log=True, dtype=np.float32)
     primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
@@ -196,6 +191,113 @@ class DPOAEController(AbstractController):
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
 
+    def next_trial(self, info=None):
+        try:
+            log.debug('Preparing next trial')
+            self.refresh_context(evaluate=True)
+        except StopIteration:
+            self.stop()
+            return
+        except Exception as e:
+            error(None, str(e))
+            self.stop()
+            return
+
+        f1_frequency = self.get_current_value('f1_frequency')
+        f2_frequency = self.get_current_value('f2_frequency')
+        dpoae_frequency = self.get_current_value('dpoae_frequency')
+        f1_level = self.get_current_value('f1_level')
+        f2_level = self.get_current_value('f2_level')
+        response_window = self.get_current_value('response_window')
+        iti = self.get_current_value('iti')
+        time_averages = self.get_current_value('time_averages')
+        spectrum_averages = self.get_current_value('spectrum_averages')
+        dpoae_nf = self.get_current_value('dpoae_noise_floor')
+        mic_gain = self.get_current_value('exp_mic_gain')
+
+        analysis_samples = int(self.adc_fs*response_window)
+
+        # Pipeline continously recieves data from the analog acquisition system,
+        # groups the samples into chunks of `analysis_samples`.  Each chunk is
+        # then sent through the rest of the pipeline.  The counter tracks the
+        # number of chunks that have pased through, reshape ensures that the
+        # next blocking can group the chunks into the specified number of
+        # `time_averages` (for analysis by the DPOAE reject function).  If the
+        # chunks pass the reject criterion, then they are returned to this class
+        # for storage.
+        pipeline = \
+            blocked(analysis_samples, -1,
+            counter(self.update_repetitions,
+            reshape((1, -1, analysis_samples),
+            blocked(time_averages, 0,
+            dpoae_reject(self.adc_fs, dpoae_frequency, self.mic_cal, dpoae_nf,
+            self)))))
+
+        self.waveforms = []
+        self.pipeline = pipeline
+        self.current_repetitions = 0
+        self.current_valid_repetitions = 0
+        self.to_acquire = spectrum_averages*time_averages
+
+        self.iface_atten = ni.DAQmxAttenControl()
+        self.iface_atten.setup()
+
+        c1 = blocks.Tone(frequency=f1_frequency, level=f1_level, name='f1') >> \
+            blocks.Cos2Envelope(duration=np.inf, rise_time=10e-3) >> \
+            ni.DAQmxChannel(
+                calibration=self.primary_sens, attenuator=self.iface_atten,
+                attenuator_channel=ni.DAQmxDefaults.AO0_ATTEN_CHANNEL)
+
+        c2 = blocks.Tone(frequency=f2_frequency, level=f2_level, name='f2') >> \
+            blocks.Cos2Envelope(duration=np.inf, rise_time=10e-3) >> \
+            ni.DAQmxChannel(
+                calibration=self.secondary_sens, attenuator=self.iface_atten,
+                attenuator_channel=ni.DAQmxDefaults.AO1_ATTEN_CHANNEL)
+
+        self.iface_dac = ni.ContinuousDAQmxPlayer(
+            output_line=ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
+            # Hack to reverse lines since the run line isn't connected via the
+            # PCB.  Need to update so that P0.1 is connected to PFI1..
+            trigger_line=ni.DAQmxDefaults.AO_RUN,
+            run_line=ni.DAQmxDefaults.AO_TRIGGER,
+            fs=self.dac_fs,
+            # TODO: Hack -- should be able to set this to infinity (e.g. never
+            # halt).  However, the time() vector is sometimes used in
+            # ContinuousPlayer.
+            duration=120,
+            buffer_size=1,
+            monitor_interval=0.1,
+        )
+
+        self.iface_adc = ni.ContinuousDAQmxSource(
+            input_line=self.mic_input_line,
+            fs=self.adc_fs,
+            pipeline=pipeline,
+            complete_callback=self.trial_complete,
+            expected_range=5,
+            # Hack because the run line isn't connected via the PCB.  Need to
+            # update so that P0.1 is connected to PFI1.
+            run_line=ni.DAQmxDefaults.AI_TRIGGER,
+            # Throw away the first chunk.
+            delay_samples=analysis_samples,
+            callback_samples=analysis_samples,
+        )
+
+        # Ordering is important.  First channel is sent to ao0, second channel
+        # to ao1.  The left attenuator channel controls ao0, right attenuator
+        # channel controls ao1.
+        self.iface_dac.add_channel(c1, name='primary')
+        self.iface_dac.add_channel(c2, name='secondary')
+
+        log.debug('Setting hardware attenuation')
+        self.primary_attenuation, self.secondary_attenuation = \
+            self.iface_dac.set_best_attenuations()
+
+        log.debug('Starting ADC acquisition')
+        self.iface_adc.start()
+        log.debug('Starting DAC playout')
+        self.iface_dac.play_continuous()
+
     def update_repetitions(self, repetitions):
         self.current_repetitions = repetitions
 
@@ -225,8 +327,8 @@ class DPOAEController(AbstractController):
             self.get_current_value('dpoae_frequency'),
             self.get_current_value('dp_frequency'),
             self.get_current_value('f2_level'),
-            self.mic_cal,
-            self.get_current_value('ramp_duration'))
+            self.mic_cal
+        )
         self.save_waveforms(waveforms, **results)
 
         if not self.pause_requested:
@@ -263,9 +365,9 @@ class DPOAEController(AbstractController):
             **results)
 
     def send(self, waveforms):
+        log.debug('Recieved %r samples', waveforms.shape)
         self.waveforms.append(waveforms)
         self.current_valid_repetitions += len(waveforms)
-        self.current_repetitions = self.pipeline.n
         if self.current_valid_repetitions >= self.to_acquire:
             raise GeneratorExit
 
@@ -306,103 +408,6 @@ class DPOAEController(AbstractController):
         self.secondary_range = \
             self.mic_cal.get_sf(f2_frequency, f2_level)*np.sqrt(2)*1e3
 
-    def next_trial(self, info=None):
-        try:
-            log.debug('Preparing next trial')
-            self.refresh_context(evaluate=True)
-        except StopIteration:
-            self.stop()
-            return
-        except Exception as e:
-            error(None, str(e))
-            self.stop()
-            return
-
-        f1_frequency = self.get_current_value('f1_frequency')
-        f2_frequency = self.get_current_value('f2_frequency')
-        dpoae_frequency = self.get_current_value('dpoae_frequency')
-        f1_level = self.get_current_value('f1_level')
-        f2_level = self.get_current_value('f2_level')
-        probe_duration = self.get_current_value('probe_duration')
-        response_window = self.get_current_value('response_window')
-        response_offset = self.get_current_value('response_offset')
-        ramp_duration = self.get_current_value('ramp_duration')
-        iti = self.get_current_value('iti')
-        time_averages = self.get_current_value('time_averages')
-        spectrum_averages = self.get_current_value('spectrum_averages')
-        dpoae_nf = self.get_current_value('dpoae_noise_floor')
-        mic_gain = self.get_current_value('exp_mic_gain')
-
-        pipeline = counter(self.update_repetitions,  # noqa
-            blocked(time_averages, 0,
-            dpoae_reject(self.adc_fs, dpoae_frequency, self.mic_cal, dpoae_nf,
-            self)))
-
-        self.waveforms = []
-        self.pipeline = pipeline
-        self.current_repetitions = 0
-        self.current_valid_repetitions = 0
-        self.to_acquire = spectrum_averages*time_averages
-        self.offset_samples = int(response_offset*self.adc_fs)
-
-        self.iface_atten = ni.DAQmxAttenControl()
-        self.iface_atten.setup()
-
-        c1 = blocks.Tone(frequency=f1_frequency, level=f1_level, name='f1') >> \
-            blocks.Cos2Envelope(duration=probe_duration,
-                                rise_time=ramp_duration) >> \
-            ni.DAQmxChannel(
-                calibration=self.primary_sens, attenuator=self.iface_atten,
-                attenuator_channel=ni.DAQmxDefaults.AO0_ATTEN_CHANNEL)
-
-        c2 = blocks.Tone(frequency=f2_frequency, level=f2_level, name='f2') >> \
-            blocks.Cos2Envelope(duration=probe_duration,
-                                rise_time=ramp_duration) >> \
-            ni.DAQmxChannel(
-                calibration=self.secondary_sens, attenuator=self.iface_atten,
-                attenuator_channel=ni.DAQmxDefaults.AO1_ATTEN_CHANNEL)
-
-        self.iface_dac = ni.QueuedDAQmxPlayer(
-            output_line=ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
-            duration=probe_duration+iti, fs=self.dac_fs)
-        self.iface_adc = ni.TriggeredDAQmxSource(
-            input_line=self.mic_input_line,
-            fs=self.adc_fs,
-            epoch_duration=response_window,
-            trigger_delay=response_offset,
-            pipeline=pipeline,
-            complete_callback=self.trial_complete,
-            expected_range=5,
-        )
-
-        # Ordering is important.  First channel is sent to ao0, second channel
-        # to ao1.  The left attenuator channel controls ao0, right attenuator
-        # channel controls ao1.
-        self.iface_dac.add_channel(c1, name='primary')
-        self.iface_dac.add_channel(c2, name='secondary')
-
-        log.debug('Setting hardware attenuation')
-        self.primary_attenuation, self.secondary_attenuation = \
-            self.iface_dac.set_best_attenuations()
-
-        try:
-            self.iface_dac.queue_init('FIFO')
-            self.iface_dac.queue_append(np.inf)
-        except SystemError:
-            self.iface_dac.clear()
-            self.iface_adc.clear()
-            try:
-                self.next_trial()
-            except StopIteration:
-                # We are done with the experiment
-                self.stop()
-                return
-
-        log.debug('Starting ADC acquisition')
-        self.iface_adc.start()
-        log.debug('Starting DAC playout')
-        self.iface_dac.play_queue()
-
     def primary_calibration_gain_callback(self, value):
         self.primary_calibration_gain = value
 
@@ -415,10 +420,18 @@ class DPOAEExperiment(AbstractExperiment):
     paradigm = Instance(DPOAEParadigm, ())
     data = Instance(AbstractData, ())
 
-    time_plot = Instance(Component)
+    time_data = Instance(ArrayPlotData)
+    time_plots = Instance(Component)
+    zoomed_time_plot = Instance(Component)
+    overview_time_plot = Instance(Component)
+
     spectrum_plot = Instance(Component)
     dp_plot = Instance(Component)
     dp_data = Instance(ArrayPlotData)
+
+    def _time_data_default(self):
+        return ArrayPlotData(time=[], first_waveform=[], last_waveform=[],
+                             average_waveform=[])
 
     def _dp_data_default(self):
         return ArrayPlotData(f2_level=[], f1_spl=[], f2_spl=[], dpoae_spl=[],
@@ -433,8 +446,44 @@ class DPOAEExperiment(AbstractExperiment):
             plot.plot(('f2_level', 'dp_spl'), type=pt, color='darkblue')
             plot.plot(('f2_level', 'dpoae_nf'), type=pt, color='gray')
             plot.plot(('f2_level', 'dp_nf'), type=pt, color='lightblue')
-
         return plot
+
+    def _zoomed_time_plot_default(self):
+        plot = Plot(self.time_data, padding=0, spacing=0)
+        plot.plot(('time', 'average_waveform'), type='line', color='black')
+        plot.plot(('time', 'first_waveform'), type='line', color='blue')
+        plot.plot(('time', 'last_waveform'), type='line', color='red')
+        #plot.underlays = []
+        #axis = PlotAxis(orientation='bottom', component=plot,
+        #                tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
+        #                title='Time (msec)')
+        #plot.underlays.append(axis)
+        #axis = PlotAxis(orientation='left', component=plot,
+        #                title='Exp. mic. (mV)')
+        #plot.underlays.append(axis)
+        return plot
+
+    def _overview_time_plot_default(self):
+        plot = Plot(self.time_data, padding=0, spacing=0)
+        plot.plot(('time', 'average_waveform'), type='line', color='black')
+        plot.plot(('time', 'first_waveform'), type='line', color='blue')
+        plot.plot(('time', 'last_waveform'), type='line', color='red')
+        #plot.underlays = []
+        #axis = PlotAxis(orientation='bottom', component=plot,
+        #                tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
+        #                title='Time (msec)')
+        #plot.underlays.append(axis)
+        #axis = PlotAxis(orientation='left', component=plot,
+        #                title='Exp. mic. (mV)')
+        #plot.underlays.append(axis)
+        return plot
+
+    def _time_plots_default(self):
+        container = VPlotContainer(padding=50, spacing=50,
+                                   bgcolor='transparent')
+        container.add(self.zoomed_time_plot)
+        container.add(self.overview_time_plot)
+        return container
 
     def clear_dp_data(self, **kwargs):
         for name in self.dp_data.list_data():
@@ -446,33 +495,16 @@ class DPOAEExperiment(AbstractExperiment):
             self.dp_data.set_data(k, new_data)
 
     def update_time_plots(self, fs, waveforms, f2_frequency):
+        waveforms = signal.detrend(waveforms)*1e3
         samples = waveforms.shape[-1]
         time = np.arange(samples)/fs
-        waveform = waveforms.mean(axis=0)*1e3
+        self.time_data.set_data('time', time)
+        self.time_data.set_data('average_waveform', waveforms.mean(axis=0))
+        self.time_data.set_data('first_waveform', waveforms[0])
+        self.time_data.set_data('last_waveform', waveforms[-1])
+        self.zoomed_time_plot.index_range = DataRange1D(
+            low_setting=0, high_setting=10/f2_frequency)
 
-        container = VPlotContainer(padding=50, spacing=50)
-        plot = create_line_plot((time, waveform), color='black')
-        plot.index_range = DataRange1D(low_setting=10e-3,
-                                       high_setting=10e-3+20/f2_frequency)
-        axis = PlotAxis(orientation='bottom', component=plot,
-                        tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
-                        title='Time (msec)')
-        plot.underlays.append(axis)
-        axis = PlotAxis(orientation='left', component=plot,
-                        title='Exp. mic. (mV)')
-        plot.underlays.append(axis)
-        container.add(plot)
-
-        plot = create_line_plot((time, waveform), color='black')
-        axis = PlotAxis(orientation='bottom', component=plot,
-                        tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
-                        title='Time (msec)')
-        plot.underlays.append(axis)
-        axis = PlotAxis(orientation='left', component=plot,
-                        title='Exp. mic. (mV)')
-        plot.underlays.append(axis)
-        container.add(plot)
-        self.time_plot = container
 
     def update_spectrum_plots(self, fs, waveforms, time_averages,
                               dpoae_frequency, window):
@@ -514,7 +546,7 @@ class DPOAEExperiment(AbstractExperiment):
 
     def update_plots(self, fs, waveforms, time_averages, f1_frequency,
                      f2_frequency, dpoae_frequency, dp_frequency, f2_level,
-                     mic_cal, ramp_duration, window=None):
+                     mic_cal, window=None):
 
         self.update_time_plots(fs, waveforms, f2_frequency)
         self.update_spectrum_plots(fs, waveforms, time_averages,
@@ -582,7 +614,7 @@ class DPOAEExperiment(AbstractExperiment):
             ),
             VGroup(
                 HGroup(
-                    Item('time_plot', show_label=False,
+                    Item('time_plots', show_label=False,
                          editor=ComponentEditor(width=300, height=300)),
                     Item('dp_plot', show_label=False,
                          editor=ComponentEditor(width=300, height=300)),
@@ -649,10 +681,10 @@ if __name__ == '__main__':
     from neurogen.calibration import InterpCalibration, FlatCalibration
     from neurogen.util import db
     import PyDAQmx as pyni
-    configure_logging()
+    configure_logging('temp.log')
 
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/150325 - mic calibration with better chassis grounding.mic'
+    mic_file = 'c:/data/cochlear/calibration/140401 - mic cal v2.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
 
