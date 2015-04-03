@@ -147,16 +147,51 @@ def create_event_timer(trigger, fs, counter='/Dev1/Ctr0',
     return task
 
 
-def create_continuous_ai(ai, fs, expected_range=10, callback=None,
-                         callback_samples=None, task_analog=None):
+def create_continuous_ai(ai, fs, run_line, expected_range=10, callback=None,
+                         callback_samples=None, delay_samples=0,
+                         posttrigger_samples=2, task_analog=None):
+    '''
+    Parameters
+    ----------
+    ai : str
+        Analog input line(s) to acquire in this task
+    run_line : str
+        Digital input line.  Rising edge triggers acquisition, falling edge
+        halts acquisition.
+    expected_range : float
+        Range of signal (in volts).
+    callback : callable
+        Function to call with acquired data
+    callback_samples : int
+    '''
+
     if task_analog is None:
         task_analog = create_task()
     vlb, vub = -expected_range, expected_range
-    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb, vub,
-                                ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb,
+                                vub, ni.DAQmx_Val_Volts, '')
+
+    # Set up acquisition start/end trigger.  The acquisition will continue after
+    # the stop trigger by the specified number of posttrigger samples.  We need
+    # to set the buffer read relative to "current read position" to enable the
+    # DAQmx read functions to read samples that are put into the buffer after
+    # the start trigger occurs (just like a normal continuous read).  If we
+    # don't change this property, then the read would wait until the reference
+    # trigger was recieved before it could retrieve samples from the buffer.
+    # Also important, the buffer size must be explicitly set to a relatively
+    # large size otherwise it will be set at posttrigger_samples+2.  Data would
+    # almost certainly be lost under this scenario!
+    ni.DAQmxCfgDigEdgeStartTrig(task_analog, run_line, ni.DAQmx_Val_Rising)
+    ni.DAQmxCfgDigEdgeRefTrig(task_analog, run_line, ni.DAQmx_Val_Falling, 2)
     ni.DAQmxCfgSampClkTiming(task_analog, None, fs, ni.DAQmx_Val_Rising,
-                             ni.DAQmx_Val_ContSamps, 0)
+                             ni.DAQmx_Val_FiniteSamps, posttrigger_samples+2)
+    ni.DAQmxSetReadRelativeTo(task_analog, ni.DAQmx_Val_CurrReadPos)
     ni.DAQmxSetBufInputBufSize(task_analog, int(callback_samples*1000))
+
+    # Delay acquisition relative to the start trigger.
+    ni.DAQmxSetStartTrigDelayUnits(task_analog, ni.DAQmx_Val_SampClkPeriods)
+    ni.DAQmxSetStartTrigDelay(task_analog, delay_samples)
+
     ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
     if callback is not None:
         cb_ptr = create_everynsamples_callback(callback, callback_samples,
@@ -280,21 +315,27 @@ def create_continuous_ao(ao, trigger, run, fs,
         task_digital = create_task()
     vmin, vmax = -expected_range, expected_range
 
-    # Setup analog output
+    # Setup analog output and prevent playout of data that has already been
+    # played.
     ni.DAQmxCreateAOVoltageChan(task_analog, ao, '', vmin, vmax,
                                 ni.DAQmx_Val_Volts, '')
     ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
+
     if duration is None:
-        ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
-                                 ni.DAQmx_Val_ContSamps, int(fs))
+        args = ni.DAQmx_Val_ContSamps, int(fs)
     else:
-        ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
-                                 ni.DAQmx_Val_FiniteSamps, int(duration*fs))
+        args = ni.DAQmx_Val_FiniteSamps, int(duration*fs)
+    ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising, *args)
     ni.DAQmxCfgOutputBuffer(task_analog, int(fs*10))
 
-    # Set up trigger line
+    # Set up trigger line, ensuring that trigger and run lines are at LOW (in
+    # case previous task aborted before the zero samples were written out).
     do = ','.join([trigger, run])
     ni.DAQmxCreateDOChan(task_digital, do, '', ni.DAQmx_Val_ChanPerLine)
+    ni.DAQmxWriteDigitalLines(task_digital, 1, True, -1,
+                              ni.DAQmx_Val_GroupByChannel,
+                              np.array([0, 0], dtype=np.uint8),
+                              ctypes.c_int32(), None)
     ni.DAQmxSetWriteRegenMode(task_digital, ni.DAQmx_Val_DoNotAllowRegen)
     ni.DAQmxCfgSampClkTiming(task_digital, 'ao/SampleClock', fs,
                              ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
@@ -314,6 +355,7 @@ def create_continuous_ao(ao, trigger, run, fs,
     # Commit the tasks so we can catch resource errors early
     ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
     ni.DAQmxTaskControl(task_digital, ni.DAQmx_Val_Task_Commit)
+
 
     # Log configuration info regarding task
     result = ctypes.c_uint32()
@@ -532,7 +574,8 @@ class DAQmxSource(DAQmxBase):
 class ContinuousDAQmxSource(DAQmxSource):
 
     def __init__(self, fs=25e3, input_line='/Dev1/ai0', callback=None,
-                 callback_samples=None, expected_range=10, pipeline=None):
+                 callback_samples=None, expected_range=10, run_line=None,
+                 delay_samples=0, pipeline=None, complete_callback=None):
         '''
         Parameters
         ----------
@@ -553,12 +596,18 @@ class ContinuousDAQmxSource(DAQmxSource):
     def setup(self):
         log.debug('Setting up continuous AI tasks')
         self._task_analog, self._cb_ptr = create_continuous_ai(
-            ai=self.input_line, fs=self.fs, expected_range=self.expected_range,
+            ai=self.input_line,
+            fs=self.fs,
+            run_line=self.run_line,
+            expected_range=self.expected_range,
             callback=self.trigger_callback,
-            callback_samples=self.callback_samples)
+            callback_samples=self.callback_samples,
+            delay_samples=self.delay_samples,
+        )
         self._tasks.append(self._task_analog)
         self.channels = num_channels(self._task_analog)
-        log.debug('Configured retriggerable AI with %d channels', self.channels)
+        log.debug('Configured continous AI with %d channels controlled by %s',
+                  self.channels, self.run_line)
         super(ContinuousDAQmxSource, self).setup()
 
     def samples_available(self):
@@ -714,16 +763,22 @@ class AbstractDAQmxPlayer(DAQmxBase):
         ni.DAQmxGetWriteTotalSampPerChanGenerated(self._task_analog, result)
         buffered = self.samples_written-result.value
         write_size = self.buffer_samples-buffered
-        log.debug('%d samples transferred to buffer, '
+        log.debug('%d samples written to buffer, '
                   '%d samples transferred to device '
                   '%d samples to add to buffer',
                   self.samples_written, result.value, write_size)
         return write_size
 
     def write(self, analog, trigger, running):
+        analog = np.asarray(analog)
+        trigger = np.asarray(trigger)
+        running = np.asarray(running)
+
         analog_result = ctypes.c_long()
         digital_result = ctypes.c_long()
         log.debug('Writing array of shape %r to AO', analog.shape)
+        log.debug('First sample %f, last sample %f', analog.ravel()[0],
+                  analog.ravel()[-1])
         ni.DAQmxWriteAnalogF64(self._task_analog, analog.shape[-1], False, -1,
                                ni.DAQmx_Val_GroupByChannel,
                                analog.ravel().astype(np.double), analog_result,
@@ -734,8 +789,8 @@ class AbstractDAQmxPlayer(DAQmxBase):
                                   data.astype(np.uint8), digital_result, None)
         log.debug('Wrote %d s/chan to %s', analog_result.value,
                   self.output_line)
-        log.debug('Wrote %d s/chan to %s', digital_result.value,
-                  self.trigger_line)
+        log.debug('Wrote %d s/chan to %s and %s', digital_result.value,
+                  self.trigger_line, self.run_line)
         self.samples_written += analog_result.value
 
     def status(self):
@@ -770,7 +825,10 @@ class QueuedDAQmxPlayer(AbstractDAQmxPlayer, QueuedPlayer):
 
 
 class ContinuousDAQmxPlayer(AbstractDAQmxPlayer, ContinuousPlayer):
-    pass
+
+    def clear(self):
+        super(ContinuousDAQmxPlayer, self).clear()
+        self.reset()
 
 
 class DAQmxAttenControl(DAQmxBase):
