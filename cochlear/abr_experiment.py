@@ -133,7 +133,7 @@ class ABRController(AbstractController):
         ('total_repetitions', np.float32),
     ]
 
-    search_gains = [-40, -60, -20, -30, -10, 0, 10]
+    search_gains = [-40, -20, -30, -10, 0, 10]
 
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
@@ -193,7 +193,6 @@ class ABRController(AbstractController):
         iface_atten = ni.DAQmxAttenControl()
         iface_atten.setup()
 
-        print ni.DAQmxDefaults.ERP_INPUT
         iface_adc = ni.TriggeredDAQmxSource(
             epoch_duration=epoch_duration,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
