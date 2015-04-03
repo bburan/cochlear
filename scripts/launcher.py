@@ -5,7 +5,8 @@ import re
 import numpy as np
 import tables
 
-from traits.api import (HasTraits, Property, List, Str, Instance, Date, Enum)
+from traits.api import (HasTraits, Property, List, Str, Instance, Date, Enum,
+                        Event)
 from traitsui.api import (View, VGroup, EnumEditor, Item, ToolBar, Action,
                           Controller, HGroup)
 from pyface.api import ImageResource
@@ -84,6 +85,10 @@ class ExperimentSetup(HasTraits):
 
     base_filename = Property(depends_on='experimenter, animal, experiment_note')
 
+    # Events that can be logged
+    reposition_pt_event = Event
+    administer_anesthesia_event = Event
+
     def _date_default(self):
         return dt.date.today()
 
@@ -99,7 +104,7 @@ class ExperimentSetup(HasTraits):
     def _update_calibrations(self):
         calibrations = settings.list_mic_cal()
         calibrations = [os.path.basename(c) for c in calibrations]
-        self.calibration = calibrations[0]
+        self.calibration = calibrations[-1]
         return calibrations
 
     def _get_experimenters(self):
