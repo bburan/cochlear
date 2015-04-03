@@ -6,6 +6,17 @@ import numpy as np
 from neurogen.calibration import InterpCalibration
 
 
+def truncate_file(filename, new_filename, new_size):
+    if os.path.exists(new_filename):
+        raise IOError('Output file already exists')
+    with tables.open_file(new_filename, 'w') as fh_new:
+        with tables.open_file(filename, 'r') as fh:
+            fh_new.copyNode(fh.root.trial_log, fh_new.root)
+            fh_new.copyNode(fh.root.waveforms, fh_new.root)
+        fh_new.root.trial_log.truncate(new_size)
+        fh_new.root.waveforms.truncate(new_size)
+
+
 def merge_files(filenames, new_filename):
     if os.path.exists(new_filename):
         raise IOError('Output file already exists')
