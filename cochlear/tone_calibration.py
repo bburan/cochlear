@@ -857,37 +857,3 @@ def launch_mic_cal_gui(**kwargs):
 if __name__ == '__main__':
     handler = MicToneCalibrationController()
     MicToneCalibration().configure_traits(handler=handler)
-
-    # Verify calibration
-    #mic_sens_dbv = db(2.685*1e-3)
-    #ref_cal = InterpCalibration([0, 100e3], [mic_sens_dbv, mic_sens_dbv])
-    #mic_file = 'c:/data/cochlear/calibration/141230 chirp calibration.mic'
-    #exp_cal = InterpCalibration.from_mic_file(mic_file, fixed_gain=-40)
-    #for freq in (500, 1000, 2000, 4000, 8000, 16000):
-    #    ref = tone_spl(freq, ref_cal, input_line='/Dev1/ai0',
-    #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
-    #    exp = tone_spl(freq, exp_cal, input_line='/Dev1/ai1',
-    #                output_line='/Dev1/ao1', vrms=1/np.sqrt(2), gain=-20)
-    #    print ref, exp
-
-    #ref = tone_spl(1000, ref_cal, input_line='/Dev1/ai0',
-    #            output_line='/Dev1/ao0', vrms=1, gain=-60)
-    #exp = tone_spl(3330, exp_cal, input_line='/Dev1/ai1',
-    #            output_line='/Dev1/ao0', vrms=1, gain=-20)
-    #print ref+20, exp+20
-
-    #import PyDAQmx as pyni
-    #pyni.DAQmxResetDevice('Dev1')
-    #ref = db(ref)
-    #exp = db(exp)+18.5-20
-    #print 'ref', ref
-    #print 'exp', exp
-    #print exp+mic_sens_dbv-ref
-
-    ##ref = tone_power(6e3, input_line='/Dev1/ai0', output_line='/Dev1/ao1', gain=0)
-    ##exp = tone_power(6e3, input_line='/Dev1/ai1', output_line='/Dev1/ao1', gain=-10)
-    ##ref = db(ref)
-    ##exp = db(exp)+10-20
-    ##print exp+mic_sens_dbv-ref
-    ###print mic_sens(4e3, '/Dev1/ai0', '/Dev1/ai1', calibration, repetitions=4,
-    ###               gain=-20, vrms=1)
