@@ -177,12 +177,12 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
     # Measure the noise floor
     c1.token = blocks.Silence()
     c2.token = blocks.Silence()
-    nf_signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+    nf_signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
 
     # Measure the actual output
     c1.token = blocks.Tone(frequency=f1_frequency, level=0)
     c2.token = blocks.Tone(frequency=f2_frequency, level=0)
-    signal = ni.acquire(**daq_kw)[:, 0, trim_n:-trim_n]
+    signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
 
     f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd)
     f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd)
@@ -201,8 +201,8 @@ def two_tone_spl(f1_frequency, f2_frequency, input_calibration, *args,
         of each other).
     '''
     f1_rms, f2_rms = two_tone_power(f1_frequency, f2_frequency, *args, **kwargs)
-    f1_spl = input_calibration.get_spl(f1_frequency, f1_rms)
-    f2_spl = input_calibration.get_spl(f1_frequency, f2_rms)
+    f1_spl = input_calibration.get_spl(f1_frequency, f1_rms)[0]
+    f2_spl = input_calibration.get_spl(f1_frequency, f2_rms)[0]
     return f1_spl, f2_spl
 
 
