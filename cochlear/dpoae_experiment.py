@@ -205,6 +205,10 @@ class DPOAEController(AbstractController):
         response_window = self.get_current_value('response_window')
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
+        if self.value_changed('f1_frequency') or \
+                self.value_changed('f2_frequency'):
+            self.calibrate_speakers(f1_frequency, f2_frequency)
+
         self.dpoae_frequency = 2*f1_frequency-f2_frequency
         self.dp_frequency = f2_frequency-f1_frequency
 
@@ -316,6 +320,7 @@ class DPOAEController(AbstractController):
         if self.f2_frequency_changed:
             self.model.clear_dp_data(str(self.get_current_value('f2_frequency')))
             self.f2_frequency_changed = False
+        self.f1_frequency_changed = False
 
         waveforms = np.concatenate(self.waveforms, axis=0)
         waveforms = waveforms[:self.to_acquire, 0]
@@ -378,43 +383,19 @@ class DPOAEController(AbstractController):
         # value is less).
         self.mic_cal.set_fixed_gain(-exp_mic_gain)
 
-    @depends_on('exp_mic_gain')
-    def set_f1_frequency(self, f1_frequency):
-        log.debug('Calibrating primary speaker')
-        self.primary_sens = tc.tone_calibration_search(
-            f1_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line,
-            callback=self.primary_calibration_gain_callback)
-        self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
-
-    def set_f1_level(self, f1_level):
-        f1_frequency = self.get_current_value('f1_frequency')
-        self.primary_range = \
-            self.mic_cal.get_sf(f1_frequency, f1_level)*np.sqrt(2)*1e3
-
-    @depends_on('exp_mic_gain')
     def set_f2_frequency(self, f2_frequency):
-        log.debug('Calibrating secondary speaker')
-        self.secondary_sens = tc.tone_calibration_search(
-            f2_frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.SECONDARY_SPEAKER_OUTPUT,
-            input_line=self.mic_input_line,
-            callback=self.secondary_calibration_gain_callback)
-        self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
         self.f2_frequency_changed = True
 
-    def set_f2_level(self, f2_level):
-        f2_frequency = self.get_current_value('f2_frequency')
-        self.secondary_range = \
-            self.mic_cal.get_sf(f2_frequency, f2_level)*np.sqrt(2)*1e3
-
-    def primary_calibration_gain_callback(self, value):
-        self.primary_calibration_gain = value
-
-    def secondary_calibration_gain_callback(self, value):
-        self.secondary_calibration_gain = value
-
+    @depends_on('exp_mic_gain')
+    def calibrate_speakers(self, f1_frequency, f2_frequency):
+        log.debug('Calibrating speakers')
+        f1_sens, f2_sens = tc.two_tone_calibration(
+            f1_frequency, f2_frequency, self.mic_cal, f1_gain=-40, f2_gain=-40,
+            max_thd=None)
+        self.primary_sens = f1_sens
+        self.secondary_sens = f2_sens
+        self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
+        self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
 
 class _DPPlot(HasTraits):
 
@@ -668,10 +649,6 @@ class DPOAEExperiment(AbstractExperiment):
                         Item('handler.primary_attenuation', style='readonly',
                              format_str='%0.2f'),
                         Item('handler.secondary_attenuation', style='readonly',
-                             format_str='%0.2f'),
-                        Item('handler.primary_range', style='readonly',
-                             format_str='%0.2f'),
-                        Item('handler.secondary_range', style='readonly',
                              format_str='%0.2f'),
                         show_border=True,
                         label='Diagnostics',
