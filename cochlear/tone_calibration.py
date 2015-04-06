@@ -52,12 +52,20 @@ def _to_sens(output_spl, output_gain, vrms):
 
 
 def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd):
-    nf_rms = tone_power_conv(nf_signal, fs, frequency, 'flattop')
-    nf_rms_average = np.mean(nf_rms, axis=0)
-    measured_thd = thd(signal, fs, frequency, 3, 'flattop')
-    measured_thd_average = np.mean(measured_thd, axis=0)
     rms = tone_power_conv(signal, fs, frequency, 'flattop')
     rms_average = np.mean(rms, axis=0)
+
+    if max_thd is not None:
+        measured_thd = thd(signal, fs, frequency, 3, 'flattop')
+        measured_thd_average = np.mean(measured_thd, axis=0)
+    else:
+        measured_thd_average = np.full_like(rms_average, np.nan)
+
+    if min_db is not None:
+        nf_rms = tone_power_conv(nf_signal, fs, frequency, 'flattop')
+        nf_rms_average = np.mean(nf_rms, axis=0)
+    else:
+        nf_rms_average = np.full_like(rms_average, np.nan)
 
     for n, s, t in zip(nf_rms_average, rms_average, measured_thd_average):
         mesg = 'Noise floor {:.1f}dB, signal {:.1f}dB, THD {:.2f}%'
@@ -67,10 +75,10 @@ def _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd):
 
 
 def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
-    if db(rms, nf_rms) < min_db:
+    if min_db is not None and (db(rms, nf_rms) < min_db):
         m = nf_err_mesg.format(frequency, db(rms), db(nf_rms))
         raise CalibrationNFError(m)
-    if thd > max_thd:
+    if max_thd is not None and (thd > max_thd):
         m = thd_err_mesg.format(frequency, thd*100)
         raise CalibrationTHDError(m)
 
@@ -96,14 +104,19 @@ def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
         'iti': 0.01
     }
 
-    # Measure the noise floor
-    c.token = blocks.Silence()
-    nf_signal = ni.acquire(**daq_kw)
-    nf_signal = nf_signal[:, :, trim_n:-trim_n]
-
     # Measure the actual output
     c.token = blocks.Tone(frequency=frequency, level=0)
     signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+
+    # Measure the noise floor
+    if min_db is not None:
+        print 'measuring silence'
+        c.token = blocks.Silence()
+        nf_signal = ni.acquire(**daq_kw)
+        nf_signal = nf_signal[:, :, trim_n:-trim_n]
+    else:
+        nf_signal = np.full_like(signal, np.nan)
+
     return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd)
 
 
@@ -174,15 +187,19 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
         'iti': 0.01
     }
 
-    # Measure the noise floor
-    c1.token = blocks.Silence()
-    c2.token = blocks.Silence()
-    nf_signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
-
     # Measure the actual output
     c1.token = blocks.Tone(frequency=f1_frequency, level=0)
     c2.token = blocks.Tone(frequency=f2_frequency, level=0)
     signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+
+    # Measure the noise floor
+    if min_db is not None:
+        print 'measuring silence'
+        c1.token = blocks.Silence()
+        c2.token = blocks.Silence()
+        nf_signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+    else:
+        nf_signal = np.full_like(signal, np.nan)
 
     f1 = _process_tone(f1_frequency, fs, nf_signal, signal, min_db, max_thd)
     f2 = _process_tone(f2_frequency, fs, nf_signal, signal, min_db, max_thd)
@@ -202,7 +219,7 @@ def two_tone_spl(f1_frequency, f2_frequency, input_calibration, *args,
     '''
     f1_rms, f2_rms = two_tone_power(f1_frequency, f2_frequency, *args, **kwargs)
     f1_spl = input_calibration.get_spl(f1_frequency, f1_rms)[0]
-    f2_spl = input_calibration.get_spl(f1_frequency, f2_rms)[0]
+    f2_spl = input_calibration.get_spl(f2_frequency, f2_rms)[0]
     return f1_spl, f2_spl
 
 
