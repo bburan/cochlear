@@ -1,14 +1,17 @@
 import logging
 log = logging.getLogger(__name__)
 
-from traits.api import (Instance, Float, push_exception_handler, Bool, Int)
+from traits.api import (Instance, Float, push_exception_handler, Bool, Int,
+                        List, HasTraits, Str)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
-                          HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
+                          HSplit, MenuBar, Menu, Tabbed, HGroup, Include,
+                          ListEditor)
 
 from enable.api import Component, ComponentEditor
 from pyface.api import ImageResource, error
-from chaco.api import (DataRange1D, PlotAxis, VPlotContainer, create_line_plot,
-                       LogMapper, ArrayPlotData, Plot, HPlotContainer)
+from chaco.api import (DataRange1D, PlotAxis, PlotGrid, VPlotContainer,
+                       create_line_plot, LogMapper, ArrayPlotData, Plot,
+                       HPlotContainer)
 
 import numpy as np
 from scipy import signal
@@ -34,9 +37,9 @@ push_exception_handler(reraise_exceptions=True)
 DAC_FS = 200e3
 ADC_FS = 200e3
 
-def dp_freq(start, end, octave_spacing, probe_duration, c=1):
+def dp_freq(start, end, octave_spacing, period, c=1):
     frequencies = expr.octave_space(start, end, octave_spacing)
-    frequencies = expr.imul(frequencies, 1.0/probe_duration)
+    frequencies = expr.imul(frequencies, period)
     return choice.ascending(frequencies, c=c)
 
 
@@ -83,31 +86,23 @@ class DPOAEParadigm(AbstractParadigm):
 
     kw = dict(context=True, log=True)
 
-    dp_frequency = Expression('f2_frequency-f1_frequency',
-                              label='DP frequency (Hz)', **kw)
-    dpoae_frequency = Expression('2*f1_frequency-f2_frequency',
-                                 label='DPOAE frequency (Hz)', **kw)
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
-    #f2_frequency = Expression(
-    #    'u(dp(2.8e3, 32e3, 0.5, response_window), f2_level)',
-    #    label='f2 frequency (Hz)', **kw)
-    f2_frequency = Expression(8e3, label='f2 frequency (Hz)', **kw)
+    f2_frequency = Expression(
+        'u(dp(2.8e3, 32e3, 0.5, 1/response_window), f2_level)',
+        label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(50, 85, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(0, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
-
-    response_window = Expression('50e-3', label='Response window (s)', **kw)
-
-    iti = Expression(0.01, label='Intertrial interval (s)', **kw)
+    response_window = Expression('100e-3', label='Response window (s)', **kw)
     exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
 
     # Signal acquisition settings.  Increasing time_averages increases SNR by
     # sqrt(N).  Increasing spectral averages reduces variance of result.  EPL
     # uses 8&4.
     time_averages = Float(16, label='Time avg. (decr. noise floor)', **kw)
-    spectrum_averages = Float(2, label='Spectrum avg. (decr. variability)',
+    spectrum_averages = Float(4, label='Spectrum avg. (decr. variability)',
                               **kw)
 
     traits_view = View(
@@ -124,7 +119,6 @@ class DPOAEParadigm(AbstractParadigm):
             VGroup(
                 'f1_frequency',
                 'f2_frequency',
-                'dpoae_frequency',
                 'f1_level',
                 'f2_level',
                 label='Stimulus settings',
@@ -185,11 +179,16 @@ class DPOAEController(AbstractController):
         ('primary_calibration_gain', np.float32),
         ('secondary_calibration_gain', np.float32),
         ('total_repetitions', np.float32),
+        ('dpoae_frequency', np.float32),
+        ('dp_frequency', np.float32)
     ]
 
     search_gains = [-40, -60, -20]
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
+
+    dpoae_frequency = 0
+    dp_frequency = 0
 
     def next_trial(self, info=None):
         try:
@@ -203,13 +202,14 @@ class DPOAEController(AbstractController):
             self.stop()
             return
 
+        response_window = self.get_current_value('response_window')
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
-        dpoae_frequency = self.get_current_value('dpoae_frequency')
+        self.dpoae_frequency = 2*f1_frequency-f2_frequency
+        self.dp_frequency = f2_frequency-f1_frequency
+
         f1_level = self.get_current_value('f1_level')
         f2_level = self.get_current_value('f2_level')
-        response_window = self.get_current_value('response_window')
-        iti = self.get_current_value('iti')
         time_averages = self.get_current_value('time_averages')
         spectrum_averages = self.get_current_value('spectrum_averages')
         dpoae_nf = self.get_current_value('dpoae_noise_floor')
@@ -230,7 +230,8 @@ class DPOAEController(AbstractController):
             counter(self.update_repetitions,
             reshape((1, -1, analysis_samples),
             blocked(time_averages, 0,
-            dpoae_reject(self.adc_fs, dpoae_frequency, self.mic_cal, dpoae_nf,
+            dpoae_reject(self.adc_fs, self.dpoae_frequency, self.mic_cal,
+                         dpoae_nf,
             self)))))
 
         self.waveforms = []
@@ -265,8 +266,8 @@ class DPOAEController(AbstractController):
             # halt).  However, the time() vector is sometimes used in
             # ContinuousPlayer.
             duration=120,
-            buffer_size=1,
-            monitor_interval=0.1,
+            buffer_size=10,
+            monitor_interval=1,
         )
 
         self.iface_adc = ni.ContinuousDAQmxSource(
@@ -313,7 +314,7 @@ class DPOAEController(AbstractController):
         self.iface_dac.clear()
         self.iface_adc.clear()
         if self.f2_frequency_changed:
-            self.model.clear_dp_data()
+            self.model.clear_dp_data(str(self.get_current_value('f2_frequency')))
             self.f2_frequency_changed = False
 
         waveforms = np.concatenate(self.waveforms, axis=0)
@@ -324,8 +325,8 @@ class DPOAEController(AbstractController):
             self.get_current_value('time_averages'),
             self.get_current_value('f1_frequency'),
             self.get_current_value('f2_frequency'),
-            self.get_current_value('dpoae_frequency'),
-            self.get_current_value('dp_frequency'),
+            self.dpoae_frequency,
+            self.dp_frequency,
             self.get_current_value('f2_level'),
             self.mic_cal
         )
@@ -415,29 +416,44 @@ class DPOAEController(AbstractController):
         self.secondary_calibration_gain = value
 
 
+class _DPPlot(HasTraits):
+
+    parameter = Str
+    plot = Instance(Component)
+
+    traits_view = View(
+        Item('plot', show_label=False,
+             editor=ComponentEditor(width=300, height=300))
+    )
+
+
 class DPOAEExperiment(AbstractExperiment):
 
     paradigm = Instance(DPOAEParadigm, ())
     data = Instance(AbstractData, ())
 
-    time_data = Instance(ArrayPlotData)
+    tf_data = Instance(ArrayPlotData)
+
     time_plots = Instance(Component)
     zoomed_time_plot = Instance(Component)
     overview_time_plot = Instance(Component)
 
-    spectrum_plot = Instance(Component)
-    dp_plot = Instance(Component)
+    spectrum_plots = Instance(Component)
+    dpoae_spectrum_plot = Instance(Component)
+    mic_spectrum_plot= Instance(Component)
+
+    dp_plots = List(Instance(_DPPlot))
     dp_data = Instance(ArrayPlotData)
 
-    def _time_data_default(self):
+    def _tf_data_default(self):
         return ArrayPlotData(time=[], first_waveform=[], last_waveform=[],
-                             average_waveform=[])
+                             average_waveform=[], frequency=[], spectrum=[])
 
     def _dp_data_default(self):
         return ArrayPlotData(f2_level=[], f1_spl=[], f2_spl=[], dpoae_spl=[],
                              dp_spl=[], dpoae_nf=[], dp_nf=[])
 
-    def _dp_plot_default(self):
+    def _dp_plot_default(self, parameter):
         plot = Plot(self.dp_data)
         for pt in ('scatter', 'line'):
             plot.plot(('f2_level', 'f1_spl'), type=pt, color='red')
@@ -446,36 +462,65 @@ class DPOAEExperiment(AbstractExperiment):
             plot.plot(('f2_level', 'dp_spl'), type=pt, color='darkblue')
             plot.plot(('f2_level', 'dpoae_nf'), type=pt, color='gray')
             plot.plot(('f2_level', 'dp_nf'), type=pt, color='lightblue')
-        return plot
+        plot.underlays = []
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        title='f2 level (dB SPL)')
+        plot.underlays.append(axis)
+        axis = PlotAxis(orientation='left', component=plot,
+                        title='DPOAE level (dB SPL)')
+        plot.underlays.append(axis)
+        grid = PlotGrid(mapper=plot.index_mapper, component=plot,
+                        orientation='vertical', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        grid = PlotGrid(mapper=plot.value_mapper, component=plot,
+                        orientation='horizontal', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        return _DPPlot(plot=plot, parameter=parameter)
 
     def _zoomed_time_plot_default(self):
-        plot = Plot(self.time_data, padding=0, spacing=0)
+        plot = Plot(self.tf_data, padding=0, spacing=0)
         plot.plot(('time', 'average_waveform'), type='line', color='black')
         plot.plot(('time', 'first_waveform'), type='line', color='blue')
         plot.plot(('time', 'last_waveform'), type='line', color='red')
-        #plot.underlays = []
-        #axis = PlotAxis(orientation='bottom', component=plot,
-        #                tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
-        #                title='Time (msec)')
-        #plot.underlays.append(axis)
-        #axis = PlotAxis(orientation='left', component=plot,
-        #                title='Exp. mic. (mV)')
-        #plot.underlays.append(axis)
+        plot.underlays = []
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
+                        title='Time (msec)')
+        plot.underlays.append(axis)
+        axis = PlotAxis(orientation='left', component=plot,
+                        title='Exp. mic. (mV)')
+        plot.underlays.append(axis)
+        grid = PlotGrid(mapper=plot.index_mapper, component=plot,
+                        orientation='vertical', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        grid = PlotGrid(mapper=plot.value_mapper, component=plot,
+                        orientation='horizontal', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
         return plot
 
     def _overview_time_plot_default(self):
-        plot = Plot(self.time_data, padding=0, spacing=0)
+        plot = Plot(self.tf_data, padding=0, spacing=0)
         plot.plot(('time', 'average_waveform'), type='line', color='black')
-        plot.plot(('time', 'first_waveform'), type='line', color='blue')
-        plot.plot(('time', 'last_waveform'), type='line', color='red')
-        #plot.underlays = []
-        #axis = PlotAxis(orientation='bottom', component=plot,
-        #                tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
-        #                title='Time (msec)')
-        #plot.underlays.append(axis)
-        #axis = PlotAxis(orientation='left', component=plot,
-        #                title='Exp. mic. (mV)')
-        #plot.underlays.append(axis)
+        plot.underlays = []
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
+                        title='Time (msec)')
+        plot.underlays.append(axis)
+        axis = PlotAxis(orientation='left', component=plot,
+                        title='Exp. mic. (mV)')
+        plot.underlays.append(axis)
+        grid = PlotGrid(mapper=plot.index_mapper, component=plot,
+                        orientation='vertical', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        grid = PlotGrid(mapper=plot.value_mapper, component=plot,
+                        orientation='horizontal', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
         return plot
 
     def _time_plots_default(self):
@@ -485,9 +530,59 @@ class DPOAEExperiment(AbstractExperiment):
         container.add(self.overview_time_plot)
         return container
 
-    def clear_dp_data(self, **kwargs):
-        for name in self.dp_data.list_data():
-            self.dp_data.set_data(name, [])
+    def _mic_spectrum_plot_default(self):
+        plot = Plot(self.tf_data)
+        plot.plot(('frequency', 'spectrum'), type='line', color='black',
+                  index_scale='log')
+        plot.index_range = DataRange1D(low_setting=500, high_setting=50e3)
+        plot.underlays = []
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        title='Frequency (Hz)')
+        plot.underlays.append(axis)
+        axis = PlotAxis(orientation='left', component=plot,
+                        title='Exp. mic. (dB re 1mV)')
+        plot.underlays.append(axis)
+        grid = PlotGrid(mapper=plot.index_mapper, component=plot,
+                        orientation='vertical', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        grid = PlotGrid(mapper=plot.value_mapper, component=plot,
+                        orientation='horizontal', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        return plot
+
+    def _dpoae_spectrum_plot_default(self):
+        plot = Plot(self.tf_data)
+        plot.plot(('frequency', 'spectrum'), type='line', color='black',
+                  index_scale='log')
+        plot.underlays = []
+        axis = PlotAxis(orientation='bottom', component=plot,
+                        title='Frequency (Hz)')
+        plot.underlays.append(axis)
+        axis = PlotAxis(orientation='left', component=plot,
+                        title='Exp. mic. (dB re 1mV)')
+        plot.underlays.append(axis)
+        grid = PlotGrid(mapper=plot.index_mapper, component=plot,
+                        orientation='vertical', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        grid = PlotGrid(mapper=plot.value_mapper, component=plot,
+                        orientation='horizontal', line_style='dot',
+                        line_color='lightgray')
+        plot.underlays.append(grid)
+        return plot
+
+    def _spectrum_plots_default(self):
+        container = HPlotContainer(padding=10, spacing=10,
+                                   bgcolor='transparent')
+        container.add(self.mic_spectrum_plot)
+        container.add(self.dpoae_spectrum_plot)
+        return container
+
+    def clear_dp_data(self, parameter):
+        self.dp_data = self._dp_data_default()
+        self.dp_plots.append(self._dp_plot_default(parameter))
 
     def append_dp_data(self, **kwargs):
         for k, v in kwargs.items():
@@ -498,51 +593,23 @@ class DPOAEExperiment(AbstractExperiment):
         waveforms = signal.detrend(waveforms)*1e3
         samples = waveforms.shape[-1]
         time = np.arange(samples)/fs
-        self.time_data.set_data('time', time)
-        self.time_data.set_data('average_waveform', waveforms.mean(axis=0))
-        self.time_data.set_data('first_waveform', waveforms[0])
-        self.time_data.set_data('last_waveform', waveforms[-1])
+        self.tf_data.set_data('time', time)
+        self.tf_data.set_data('average_waveform', waveforms.mean(axis=0))
+        self.tf_data.set_data('first_waveform', waveforms[0])
+        self.tf_data.set_data('last_waveform', waveforms[-1])
         self.zoomed_time_plot.index_range = DataRange1D(
             low_setting=0, high_setting=10/f2_frequency)
 
-
     def update_spectrum_plots(self, fs, waveforms, time_averages,
                               dpoae_frequency, window):
-        index_range = DataRange1D(low_setting=500, high_setting=40e3)
-        index_mapper = LogMapper(range=index_range)
-
         samples = waveforms.shape[-1]
         w = waveforms.reshape((time_averages, -1, samples)).mean(axis=0)
         w_freq = psd_freq(w, fs)
-        w_psd = psd(w, fs, window).mean(axis=0)
-
-        container = HPlotContainer(padding=50, spacing=50)
-        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)),
-                                color='black')
-        plot.index_mapper = index_mapper
-        axis = PlotAxis(orientation='bottom', component=plot,
-                        title='Frequency (Hz)')
-        plot.underlays.append(axis)
-        axis = PlotAxis(orientation='left', component=plot,
-                        title='Exp. mic. (dB re 1mV)')
-        plot.underlays.append(axis)
-        container.add(plot)
-
-        plot = create_line_plot((w_freq[1:], db(w_psd[1:], 1e-3)),
-                                color='black')
-        index_range = DataRange1D(low_setting=dpoae_frequency/1.1,
-                                  high_setting=dpoae_frequency*1.1)
-        index_mapper = LogMapper(range=index_range)
-        plot.index_mapper = index_mapper
-        axis = PlotAxis(orientation='bottom', component=plot,
-                        title='Frequency (Hz)')
-        plot.underlays.append(axis)
-        axis = PlotAxis(orientation='left', component=plot,
-                        title='Exp. mic. (dB re 1mV)')
-        plot.underlays.append(axis)
-        container.add(plot)
-
-        self.spectrum_plot = container
+        w_psd = db(psd(w, fs, window).mean(axis=0), 1e-3)
+        self.tf_data.set_data('frequency', w_freq[1:])
+        self.tf_data.set_data('spectrum', w_psd[1:])
+        self.dpoae_spectrum_plot.index_range = DataRange1D(
+            low_setting=dpoae_frequency/1.1, high_setting=dpoae_frequency*1.1)
 
     def update_plots(self, fs, waveforms, time_averages, f1_frequency,
                      f2_frequency, dpoae_frequency, dp_frequency, f2_level,
@@ -580,7 +647,6 @@ class DPOAEExperiment(AbstractExperiment):
                          width=200,
                          enabled_when='not handler.state=="running"'),
                     Include('context_group'),
-                    label='Paradigm',
                 ),
                 HGroup(
                     VGroup(
@@ -616,10 +682,11 @@ class DPOAEExperiment(AbstractExperiment):
                 HGroup(
                     Item('time_plots', show_label=False,
                          editor=ComponentEditor(width=300, height=300)),
-                    Item('dp_plot', show_label=False,
-                         editor=ComponentEditor(width=300, height=300)),
+                    Item('dp_plots', show_label=False, style='custom',
+                         editor=ListEditor(use_notebook=True, deletable=False,
+                                           page_name='.parameter')),
                 ),
-                Item('spectrum_plot', show_label=False,
+                Item('spectrum_plots', show_label=False,
                      editor=ComponentEditor(width=300, height=300)),
             )
         ),
