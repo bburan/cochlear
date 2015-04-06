@@ -839,9 +839,10 @@ class DAQmxAttenControl(DAQmxBase):
     # Gain control settings in dB.  This is IC specific.  Maximum volume is
     # +31.5 dB.
     VOLUME_STEP = 0.5
-    VOLUME_MAX = 31.5
-    #VOLUME_MAX = 0
-    VOLUME_MIN = -96
+    #VOLUME_MAX = 31.5
+    #VOLUME_MIN = -96
+    VOLUME_MIN = -50
+    VOLUME_MAX = 0
     VOLUME_BITS = 16
 
     MAX_ATTEN = -VOLUME_MIN
