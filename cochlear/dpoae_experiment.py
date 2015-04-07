@@ -279,7 +279,7 @@ class DPOAEController(AbstractController):
             fs=self.adc_fs,
             pipeline=pipeline,
             complete_callback=self.trial_complete,
-            expected_range=5,
+            expected_range=10,
             # Hack because the run line isn't connected via the PCB.  Need to
             # update so that P0.1 is connected to PFI1.
             run_line=ni.DAQmxDefaults.AI_TRIGGER,
