@@ -141,11 +141,6 @@ class DPOAEController(AbstractController):
     secondary_spl = Float(label='Secondary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
     secondary_attenuation = Float(label='Secondary attenuation (dB)', **kw)
-    primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
-    secondary_calibration_gain = Float(label='Secondary cal. gain (dB)', **kw)
-
-    primary_range = Float(label='Exp. mic. V for primary (mVpp)', **kw)
-    secondary_range = Float(label='Exp. mic. V for secondary (mVpp)', **kw)
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
@@ -198,6 +193,7 @@ class DPOAEController(AbstractController):
             self.stop()
             return
         except Exception as e:
+            raise
             error(None, str(e))
             self.stop()
             return
@@ -365,8 +361,6 @@ class DPOAEController(AbstractController):
             secondary_spl=self.secondary_spl,
             primary_attenuation=self.primary_attenuation,
             secondary_attenuation=self.secondary_attenuation,
-            primary_calibration_gain=self.primary_calibration_gain,
-            secondary_calibration_gain=self.secondary_calibration_gain,
             total_repetitions=self.current_repetitions,
             **results)
 
@@ -396,6 +390,7 @@ class DPOAEController(AbstractController):
         self.secondary_sens = f2_sens
         self.primary_spl = self.primary_sens.get_spl(f1_frequency, 1)
         self.secondary_spl = self.secondary_sens.get_spl(f2_frequency, 1)
+
 
 class _DPPlot(HasTraits):
 
@@ -638,10 +633,6 @@ class DPOAEExperiment(AbstractExperiment):
                         show_border=True,
                     ),
                     VGroup(
-                        Item('handler.primary_calibration_gain',
-                             style='readonly', format_str='%d'),
-                        Item('handler.secondary_calibration_gain',
-                             style='readonly', format_str='%d'),
                         Item('handler.primary_spl', style='readonly',
                              format_str='%0.2f'),
                         Item('handler.secondary_spl', style='readonly',
