@@ -1,7 +1,7 @@
 import logging.config
 
 
-def configure_logging(filename):
+def configure_logging(filename=None):
     time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
     simple_format = '%(name)s - %(message)s'
 
@@ -18,13 +18,6 @@ def configure_logging(filename):
                 'formatter': 'simple',
                 'level': 'DEBUG',
                 },
-            # This is what gets saved to the file
-            'file': {
-                'class': 'logging.FileHandler',
-                'formatter': 'time',
-                'filename': filename,
-                'level': 'DEBUG',
-                }
             },
         'loggers': {
             '__main__': {'level': 'DEBUG'},
@@ -35,4 +28,12 @@ def configure_logging(filename):
             'handlers': ['console'],
             },
         }
+    if filename is not None:
+        logging_config['handlers']['file'] = {
+            'class': 'logging.FileHandler',
+            'formatter': 'time',
+            'filename': filename,
+            'level': 'DEBUG',
+        }
+        logging_config['root']['handlers'].append('file')
     logging.config.dictConfig(logging_config)
