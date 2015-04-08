@@ -147,9 +147,9 @@ def create_event_timer(trigger, fs, counter='/Dev1/Ctr0',
     return task
 
 
-def create_continuous_ai(ai, fs, run_line, expected_range=10, callback=None,
+def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None,
                          callback_samples=None, delay_samples=0,
-                         posttrigger_samples=2, task_analog=None):
+                         posttrigger_samples=2, task=None):
     '''
     Parameters
     ----------
@@ -165,10 +165,10 @@ def create_continuous_ai(ai, fs, run_line, expected_range=10, callback=None,
     callback_samples : int
     '''
 
-    if task_analog is None:
-        task_analog = create_task()
+    if task is None:
+        task = create_task()
     vlb, vub = -expected_range, expected_range
-    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb,
+    ni.DAQmxCreateAIVoltageChan(task, ai, '', ni.DAQmx_Val_Diff, vlb,
                                 vub, ni.DAQmx_Val_Volts, '')
 
     # Set up acquisition start/end trigger.  The acquisition will continue after
@@ -181,24 +181,29 @@ def create_continuous_ai(ai, fs, run_line, expected_range=10, callback=None,
     # Also important, the buffer size must be explicitly set to a relatively
     # large size otherwise it will be set at posttrigger_samples+2.  Data would
     # almost certainly be lost under this scenario!
-    ni.DAQmxCfgDigEdgeStartTrig(task_analog, run_line, ni.DAQmx_Val_Rising)
-    ni.DAQmxCfgDigEdgeRefTrig(task_analog, run_line, ni.DAQmx_Val_Falling, 2)
-    ni.DAQmxCfgSampClkTiming(task_analog, None, fs, ni.DAQmx_Val_Rising,
-                             ni.DAQmx_Val_FiniteSamps, posttrigger_samples+2)
-    ni.DAQmxSetReadRelativeTo(task_analog, ni.DAQmx_Val_CurrReadPos)
-    ni.DAQmxSetBufInputBufSize(task_analog, int(callback_samples*1000))
+    if run_line is not None:
+        ni.DAQmxCfgDigEdgeStartTrig(task, run_line, ni.DAQmx_Val_Rising)
+        ni.DAQmxCfgDigEdgeRefTrig(task, run_line, ni.DAQmx_Val_Falling, 2)
+        ni.DAQmxCfgSampClkTiming(task, None, fs, ni.DAQmx_Val_Rising,
+                                ni.DAQmx_Val_FiniteSamps, posttrigger_samples+2)
+        ni.DAQmxSetReadRelativeTo(task, ni.DAQmx_Val_CurrReadPos)
+        ni.DAQmxSetBufInputBufSize(task, int(callback_samples*1000))
+    else:
+        ni.DAQmxCfgSampClkTiming(task, None, fs, ni.DAQmx_Val_Rising,
+                                 ni.DAQmx_Val_ContSamps,
+                                 int(callback_samples*1000))
 
     # Delay acquisition relative to the start trigger.
     ni.DAQmxSetStartTrigDelayUnits(task_analog, ni.DAQmx_Val_SampClkPeriods)
     ni.DAQmxSetStartTrigDelay(task_analog, delay_samples)
 
-    ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
+    ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
     if callback is not None:
         cb_ptr = create_everynsamples_callback(callback, callback_samples,
-                                               task_analog)
+                                               task)
     else:
         cb_ptr = None
-    return task_analog, cb_ptr
+    return task, cb_ptr
 
 
 def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
