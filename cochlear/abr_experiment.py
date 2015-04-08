@@ -1,9 +1,11 @@
 import logging
 log = logging.getLogger(__name__)
 
-from traits.api import Instance, Float, Int, push_exception_handler, Bool
+from traits.api import (Instance, Float, Int, push_exception_handler, Bool,
+                        HasTraits, Str, List)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
-                          HSplit, MenuBar, Menu, Tabbed, HGroup, Include)
+                          HSplit, MenuBar, Menu, Tabbed, HGroup, Include,
+                          ListEditor)
 from enable.api import Component, ComponentEditor
 from pyface.api import ImageResource
 from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
@@ -66,7 +68,10 @@ class ABRParadigm(AbstractParadigm):
     # Stimulus settings
     repetition_rate = Expression(20, dtype=np.float, **kw)
     repetition_jitter = Expression(0, dtype=np.float, **kw)
-    frequency = Expression(8e3, dtype=np.float, **kw)
+
+    frequencies = [2830, 4000, 5660, 8000, 11310, 16000, 22630]
+    frequency = Expression('u(exact_order({}, c=1), level)'.format(frequencies),
+                           dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
     level = Expression(
@@ -125,6 +130,8 @@ class ABRController(AbstractController):
     dac_fs = Float(DAC_FS)
     done = Bool(False)
 
+    frequency_changed = Bool(False)
+
     extra_dtypes = [
         ('primary_sens', np.float32),
         ('primary_spl', np.float32),
@@ -133,16 +140,14 @@ class ABRController(AbstractController):
         ('total_repetitions', np.float32),
     ]
 
-    search_gains = [-40, -20, -30, -10, 0, 10]
-
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
         log.debug('Calibrating primary speaker')
-        self.primary_sens = tc.tone_calibration_search(
-            frequency, self.mic_cal, self.search_gains, max_thd=0.1,
-            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-            callback=self.primary_calibration_gain_callback)
+        self.primary_sens = tc.tone_calibration(
+            frequency, self.mic_cal, gain=-40, max_thd=None,
+            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)
+        self.frequency_changed = True
 
     def set_exp_mic_gain(self, exp_mic_gain):
         # Allow the calibration to automatically handle the gain.  Since this is
@@ -248,6 +253,9 @@ class ABRController(AbstractController):
         self.iface_dac.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
+        if self.frequency_changed:
+            self.model.clear_abr_data(str(self.get_current_value('frequency')))
+            self.frequency_changed = False
         waveforms = np.concatenate(self.waveforms, axis=0)[:self.to_acquire, 0]
         self.model.update_plots(self.adc_fs, waveforms)
         self.save_waveforms(waveforms)
@@ -274,59 +282,51 @@ class ABRController(AbstractController):
         self.primary_calibration_gain = value
 
 
+class _ABRPlot(HasTraits):
+
+    parameter = Str
+    stack = Instance(Component)
+
+    def _stack_default(self):
+        return VPlotContainer(padding=40, spacing=10)
+
+    traits_view = View(
+        Item('stack', show_label=False,
+             editor=ComponentEditor(width=300, height=300))
+    )
+
+
 class ABRExperiment(AbstractExperiment):
 
     paradigm = Instance(ABRParadigm, ())
     data = Instance(AbstractData, ())
-    abr_stack = Instance(Component)
-    neural_stack = Instance(Component)
+    abr_waveforms = List(Instance(_ABRPlot))
     initialized = Bool(False)
 
-    def _abr_stack_default(self):
-        return VPlotContainer(padding=40, spacing=10)
-
-    def _neural_stack_default(self):
-        return VPlotContainer(padding=40, spacing=10)
+    def clear_abr_data(self, parameter):
+        self.initialized = False
+        self.abr_waveforms.append(_ABRPlot(parameter=parameter))
 
     def update_plots(self, fs, waveforms):
-        Wn = 0.2e3/fs, 10e3/fs
-        b, a = signal.iirfilter(output='ba', N=1, Wn=Wn, btype='band',
-                                ftype='butter')
+        b, a = signal.iirfilter(output='ba', N=1, Wn=(0.2e3/fs, 10e3/fs),
+                                btype='band', ftype='butter')
         waveforms = signal.filtfilt(b, a, waveforms)
-
         time = np.arange(waveforms.shape[-1])/fs
         abr = np.mean(waveforms, axis=0)
-        pos = np.mean(waveforms[::2], axis=0)
-        neg = np.mean(waveforms[1::2], axis=0)
-        neural = 0.5*(pos-neg)
-
-        abr_plot = create_line_plot((time, abr), color='black')
-        neural_plot = create_line_plot((time, neural), color='red')
+        plot = create_line_plot((time, abr), color='black')
 
         if not self.initialized:
             axis = PlotAxis(
-                orientation='bottom', component=abr_plot,
+                orientation='bottom', component=plot,
                 tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
                 title='Time (msec)')
-            abr_plot.overlays.append(axis)
-            axis = PlotAxis(
-                orientation='bottom', component=neural_plot,
-                tick_label_formatter=lambda x: "{:.2f}".format(x*1e3),
-                title='Time (msec)')
-            neural_plot.overlays.append(axis)
+            plot.overlays.append(axis)
             self.initialized = True
-
-        axis = PlotAxis(orientation='left', component=abr_plot,
+        axis = PlotAxis(orientation='left', component=plot,
                         title='ABR (mv)')
-        abr_plot.overlays.append(axis)
-        axis = PlotAxis(orientation='right', component=neural_plot,
-                        title='Neural (mv)')
-        neural_plot.overlays.append(axis)
-
-        self.abr_stack.add(abr_plot)
-        self.abr_stack.request_redraw()
-        self.neural_stack.add(neural_plot)
-        self.neural_stack.request_redraw()
+        plot.overlays.append(axis)
+        self.abr_waveforms[-1].stack.add(plot)
+        self.abr_waveforms[-1].stack.request_redraw()
 
     traits_view = View(
         HSplit(
@@ -355,10 +355,9 @@ class ABRExperiment(AbstractExperiment):
                 show_border=True,
             ),
             HGroup(
-                Item('abr_stack', show_label=False,
-                    editor=ComponentEditor(width=100, height=300)),
-                Item('neural_stack', show_label=False,
-                    editor=ComponentEditor(width=100, height=300)),
+                Item('abr_waveforms', show_label=False, style='custom',
+                     editor=ListEditor(use_notebook=True, deletable=False,
+                                       page_name='.parameter'))
             ),
         ),
         resizable=True,
@@ -420,7 +419,7 @@ if __name__ == '__main__':
     import PyDAQmx as pyni
 
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/150107 chirp calibration.mic'
+    mic_file = 'c:/data/cochlear/calibration/140401 - mic cal v2.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
