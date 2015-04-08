@@ -694,8 +694,10 @@ class DAQmxChannel(Channel):
 
     # Based on testing of the PGA2310/OPA234/BUF634 circuit with volume control
     # set to 0 dB, this is the maximum allowable voltage without clipping.
-    voltage_min = -1.1*np.sqrt(2)
-    voltage_max = 1.1*np.sqrt(2)
+    #voltage_min = -1.1*np.sqrt(2)
+    #voltage_max = 1.1*np.sqrt(2)
+    voltage_min = -2.5*np.sqrt(2)
+    voltage_max = 2.5*np.sqrt(2)
 
     attenuator = ScalarInput(default=None, unit=None)
     attenuator_channel = ScalarInput(default=0, unit=None)
@@ -845,10 +847,10 @@ class DAQmxAttenControl(DAQmxBase):
     # Gain control settings in dB.  This is IC specific.  Maximum volume is
     # +31.5 dB.
     VOLUME_STEP = 0.5
-    #VOLUME_MAX = 31.5
+    VOLUME_MAX = 31.5
     #VOLUME_MIN = -96
     VOLUME_MIN = -50
-    VOLUME_MAX = 0
+    #VOLUME_MAX = 0
     VOLUME_BITS = 16
 
     MAX_ATTEN = -VOLUME_MIN
