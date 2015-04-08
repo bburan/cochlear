@@ -143,10 +143,7 @@ class ExperimentSetup(HasTraits):
                    action='run_abr_experiment'),
             Action(name='ABR check',
                    image=ImageResource('view_statistics', icon_dir),
-                   enabled_when='mic_cal is not None '
-                                'and animal '
-                                'and experimenter ',
-                   action='run_abr_check'),
+                   enabled_when='mic_cal is not None', action='run_abr_check'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
                    enabled_when='mic_cal is not None '
@@ -155,9 +152,7 @@ class ExperimentSetup(HasTraits):
                    action='run_dpoae_experiment'),
             Action(name='DPOAE check',
                    image=ImageResource('datashowchart', icon_dir),
-                   enabled_when='mic_cal is not None '
-                                'and animal '
-                                'and experimenter ',
+                   enabled_when='mic_cal is not None',
                    action='run_dpoae_check'),
         ),
     )
