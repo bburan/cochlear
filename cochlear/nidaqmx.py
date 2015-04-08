@@ -194,8 +194,9 @@ def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None
                                  int(callback_samples*1000))
 
     # Delay acquisition relative to the start trigger.
-    ni.DAQmxSetStartTrigDelayUnits(task_analog, ni.DAQmx_Val_SampClkPeriods)
-    ni.DAQmxSetStartTrigDelay(task_analog, delay_samples)
+    if delay_samples != 0:
+        ni.DAQmxSetStartTrigDelayUnits(task, ni.DAQmx_Val_SampClkPeriods)
+        ni.DAQmxSetStartTrigDelay(task, delay_samples)
 
     ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
     if callback is not None:
