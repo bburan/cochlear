@@ -89,10 +89,10 @@ class DPOAEParadigm(AbstractParadigm):
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
     f2_frequency = Expression(
-        'u(dp(2.8e3, 32e3, 0.5, 1/response_window), f2_level)',
+        'u(dp(2.8e3, 22.6e3, 0.5, 1/response_window), f2_level)',
         label='f2 frequency (Hz)', **kw)
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order(np.arange(0, 85, 5), c=1)',
+    f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
     response_window = Expression('100e-3', label='Response window (s)', **kw)
@@ -719,7 +719,7 @@ if __name__ == '__main__':
     configure_logging('temp.log')
 
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/140401 - mic cal v2.mic'
+    mic_file = 'c:/data/cochlear/calibration/150407 - calibration with 377C10.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
 
