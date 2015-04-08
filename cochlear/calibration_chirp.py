@@ -1,12 +1,15 @@
 from __future__ import division
 
+import logging
+log = logging.getLogger(__name__)
+
 import shutil
 
 import os.path
 import numpy as np
 import tables
 
-from pyface.api import ImageResource
+from pyface.api import ImageResource, error
 from traits.api import (Float, Int, Property, Any, Bool, Enum, HasTraits,
                         Instance)
 from traitsui.api import (View, Item, VGroup, Include, ToolBar, HSplit)
@@ -396,6 +399,7 @@ class ChirpCalController(AbstractController):
             shutil.copy(self.filename, filename)
 
     def start(self, info=None):
+        log.debug('Starting calibration')
         try:
             self.complete = False
             self.epochs_acquired = 0
@@ -409,7 +413,11 @@ class ChirpCalController(AbstractController):
             self._setup_output()
             self.iface_dac.play_queue()
             self.state = 'running'
-        except:
+        except Exception as e:
+            if info is not None:
+                error(info.ui.control, str(e))
+            else:
+                error(None, str(e))
             self.stop(info)
 
     def stop(self, info=None):
@@ -419,6 +427,7 @@ class ChirpCalController(AbstractController):
         self.complete = True
 
     def poll(self, waveform):
+        log.debug('Polling')
         self.model.data.exp_microphone.send(waveform[:, 0, :])
         self.model.data.ref_microphone.send(waveform[:, 1, :])
         self.epochs_acquired += 1
@@ -426,6 +435,7 @@ class ChirpCalController(AbstractController):
             self.finalize()
 
     def _setup_input(self):
+        log.debug('Setting up input')
         mic_input = '{}, {}'.format(ni.DAQmxDefaults.MIC_INPUT,
                                     ni.DAQmxDefaults.REF_MIC_INPUT)
         epoch_duration = self.get_current_value('duration')
@@ -439,6 +449,7 @@ class ChirpCalController(AbstractController):
         self.iface_adc.start()
 
     def _setup_output(self, output=None):
+        log.debug('Setting up output')
         if output is None:
             output = self.get_current_value('output')
         freq_lb = self.get_current_value('freq_lb')
@@ -549,6 +560,8 @@ def launch_gui(output='ao0', **kwargs):
 
 if __name__ == '__main__':
     tempfile = os.path.join(settings.TEMP_DIR, 'temp_mic.cal')
+    from cochlear import configure_logging
+    #configure_logging()
     with tables.open_file(tempfile, 'w') as fh:
         data = ChirpCalData(store_node=fh.root)
         controller = ChirpCalController(filename=tempfile)
