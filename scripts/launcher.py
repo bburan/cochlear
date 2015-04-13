@@ -43,7 +43,9 @@ class ExperimentController(Controller):
         paradigm_dict = {
             'averages': 128,
             'repetition_rate': 40,
-            'level': 'exact_order([90], c=1)'
+            'level': 'exact_order([80], c=1)',
+            'frequency': '11310',
+            'reject_threshold': 1.0,
         }
         abr_experiment.launch_gui(info.object.mic_cal,
                                   filename=None,
