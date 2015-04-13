@@ -110,7 +110,6 @@ def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
 
     # Measure the noise floor
     if min_db is not None:
-        print 'measuring silence'
         c.token = blocks.Silence()
         nf_signal = ni.acquire(**daq_kw)
         nf_signal = nf_signal[:, :, trim_n:-trim_n]
