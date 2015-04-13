@@ -164,7 +164,6 @@ def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None
         Function to call with acquired data
     callback_samples : int
     '''
-
     if task is None:
         task = create_task()
     vlb, vub = -expected_range, expected_range
@@ -281,8 +280,8 @@ def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
     # acquire when the counter is active.  Since the counter only runs for a
     # finite number of samples after each trigger, this is effectively a
     # triggered
-    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', ni.DAQmx_Val_Diff, vlb,
-                                vub, ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCreateAIVoltageChan(task_analog, ai, '', record_mode, vlb, vub,
+                                ni.DAQmx_Val_Volts, '')
     ni.DAQmxCfgSampClkTiming(task_analog, counter+'InternalOutput', fs,
                              ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
                              epoch_size)
