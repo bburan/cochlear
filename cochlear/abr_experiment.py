@@ -2,7 +2,7 @@ import logging
 log = logging.getLogger(__name__)
 
 from traits.api import (Instance, Float, Int, push_exception_handler, Bool,
-                        HasTraits, Str, List)
+                        HasTraits, Str, List, Enum)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include,
                           ListEditor)
@@ -60,16 +60,16 @@ class ABRParadigm(AbstractParadigm):
     kw = dict(context=True, log=True)
 
     # Signal acquisition settings
-    averages = Expression(512, dtype=np.int, **kw)
+    averages = Expression(1024, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
-    reject_threshold = Expression(0.1, dtype=np.float, **kw)
+    reject_threshold = Expression(0.2, dtype=np.float, **kw)
     exp_mic_gain = Expression(40, dtype=np.float, **kw)
 
     # Stimulus settings
     repetition_rate = Expression(20, dtype=np.float, **kw)
     repetition_jitter = Expression(0, dtype=np.float, **kw)
 
-    frequencies = [2830, 4000, 5660, 8000, 11310, 16000, 22630]
+    frequencies = [4000, 5660, 8000, 11310, 16000, 22630]
     frequency = Expression('u(exact_order({}, c=1), level)'.format(frequencies),
                            dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
@@ -205,7 +205,7 @@ class ABRController(AbstractController):
             fs=self.adc_fs,
             expected_range=10,  # 10,000 gain
             complete_callback=self.trial_complete,
-            record_mode=ni.DAQmxSource.DIFF,
+            record_mode=ni.DAQmxSource.RSE,
         )
 
         iface_dac = ni.QueuedDAQmxPlayer(
@@ -419,7 +419,7 @@ if __name__ == '__main__':
     import PyDAQmx as pyni
 
     pyni.DAQmxResetDevice('Dev1')
-    mic_file = 'c:/data/cochlear/calibration/140401 - mic cal v2.mic'
+    mic_file = 'c:/data/cochlear/calibration/150407 - calibration with 377C10.mic'
     c = InterpCalibration.from_mic_file(mic_file)
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
