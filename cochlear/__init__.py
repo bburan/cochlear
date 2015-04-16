@@ -21,8 +21,10 @@ def configure_logging(filename=None):
             },
         'loggers': {
             '__main__': {'level': 'DEBUG'},
-            'cochlear': {'level': 'DEBUG'},
-            'cochlear.nidaqmx': {'level': 'ERROR'},
+            'neurogen.calibration': {'level': 'DEBUG'},
+            'experiment': {'level': 'ERROR'},
+            'cochlear': {'level': 'ERROR'},
+            'cochlear.nidaqmx': {'level': 'DEBUG'},
             },
         'root': {
             'handlers': ['console'],
