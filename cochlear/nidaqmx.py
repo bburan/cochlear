@@ -39,7 +39,7 @@ class DAQmxDefaults(object):
 
     # See documentation in nidaqmx.TriggeredDAQmxSource for information on the
     # specifics of each line.
-    ERP_INPUT = '/{}/ai0'.format(DEV)
+    ERP_INPUT = '/{}/ai3'.format(DEV)
     MIC_INPUT = '/{}/ai1'.format(DEV)
     REF_MIC_INPUT = '/{}/ai2'.format(DEV)
 
