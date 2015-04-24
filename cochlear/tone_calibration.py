@@ -8,7 +8,6 @@ import time
 import numpy as np
 import matplotlib as mp
 import tables
-import pyfftw
 
 from traits.api import (HasTraits, Float, Int, Property, Enum, Bool, Instance,
                         Str, List, Array, cached_property)
@@ -404,7 +403,6 @@ class BaseToneCalibrationController(Controller):
 
     waveform_buffer = Instance('numpy.ndarray')
     fft_buffer = Instance('numpy.ndarray')
-    fftw = Instance('pyfftw.FFTW')
 
     def setup(self):
         self.running = True
