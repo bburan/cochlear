@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from distutils.core import setup
 
 setup(
@@ -11,7 +10,7 @@ setup(
     description='Module for various auditory experiments',
     requires=['numpy'],
     scripts=[
-        'scripts/merge_abr_files.py',
+        'scripts/merge_files.py',
         'scripts/launcher.py',
     ],
 )
