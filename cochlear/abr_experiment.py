@@ -125,6 +125,7 @@ class ABRController(AbstractController):
 
     current_valid_repetitions = Int(0)
     current_repetitions = Int(0)
+    current_rejects = Int(0)
 
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
@@ -233,6 +234,7 @@ class ABRController(AbstractController):
         self.waveforms = []
         self.to_acquire = averages
         self.current_valid_repetitions = 0
+        self.current_rejects = 0
 
         iface_adc.start()
         iface_dac.play_queue()
@@ -246,6 +248,8 @@ class ABRController(AbstractController):
         self.waveforms.append(waveforms)
         self.current_valid_repetitions += 2
         self.current_repetitions = self.pipeline.n
+        self.current_rejects = self.current_repetitions-\
+            self.current_valid_repetitions
         if self.current_valid_repetitions >= self.to_acquire:
             raise GeneratorExit
 
@@ -349,6 +353,8 @@ class ABRExperiment(AbstractExperiment):
                          label='Repetitions'),
                     Item('handler.current_valid_repetitions', style='readonly',
                          label='Valid repetitions'),
+                    Item('handler.current_rejects', style='readonly',
+                         label='Rejects'),
                     label='Diagnostics',
                     show_border=True,
                 ),
@@ -371,6 +377,7 @@ class ABRExperiment(AbstractExperiment):
             Action(name='Stop', action='stop',
                    image=ImageResource('stop', icon_dir),
                    enabled_when='handler.state=="running"'),
+            '-',
             Action(name='Pause', action='request_pause',
                    image=ImageResource('player_pause', icon_dir),
                    enabled_when='handler.state=="running" and '
