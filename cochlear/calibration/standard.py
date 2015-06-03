@@ -9,7 +9,7 @@ from enable.api import ComponentEditor
 from chaco.api import (create_line_plot, PlotAxis, VPlotContainer, DataRange1D,
                        LogMapper, OverlayPlotContainer)
 
-from nidaqmx import DAQmxDefaults, ContinuousDAQmxSource
+from cochlear.nidaqmx import DAQmxDefaults, ContinuousDAQmxSource
 from experiment import (AbstractController, icon_dir, AbstractData,
                         AbstractParadigm, AbstractData)
 from neurogen.util import db, dbtopa

@@ -22,7 +22,7 @@ from neurogen.util import db
 from neurogen import block_definitions as blocks
 from neurogen.calibration.util import (psd, psd_freq, tone_power_conv_nf)
 from cochlear import nidaqmx as ni
-from cochlear import tone_calibration as tc
+from cochlear import calibration
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
                         AbstractController, AbstractExperiment, depends_on)
@@ -381,7 +381,7 @@ class DPOAEController(AbstractController):
     @depends_on('exp_mic_gain')
     def calibrate_speakers(self, f1_frequency, f2_frequency):
         log.debug('Calibrating speakers')
-        f1_sens, f2_sens = tc.two_tone_calibration(
+        f1_sens, f2_sens = calibration.two_tone_calibration(
             f1_frequency, f2_frequency, self.mic_cal, f1_gain=-40, f2_gain=-40,
             max_thd=None)
         self.primary_sens = f1_sens

@@ -15,7 +15,7 @@ from experiment import icon_dir
 from neurogen.calibration import InterpCalibration
 
 from cochlear import settings
-from cochlear import calibration_chirp as calibration
+from cochlear.calibration import chirp
 from cochlear import abr_experiment
 from cochlear import dpoae_experiment
 
@@ -23,7 +23,7 @@ from cochlear import dpoae_experiment
 class ExperimentController(Controller):
 
     def run_microphone_calibration(self, info):
-        calibration.launch_gui('ao0', parent=info.ui.control, kind='livemodal')
+        chirp.launch_gui('ao0', parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
 
     def _get_filename(self, info, experiment):

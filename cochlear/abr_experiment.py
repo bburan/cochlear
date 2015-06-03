@@ -21,7 +21,7 @@ from neurogen.block_definitions import Tone, Cos2Envelope, Click
 from neurogen.calibration import PointCalibration
 
 from cochlear import nidaqmx as ni
-from cochlear import tone_calibration as tc
+from cochlear import calibration
 
 from experiment import (AbstractParadigm, Expression, AbstractData,
                         AbstractController, AbstractExperiment, depends_on)
@@ -144,7 +144,7 @@ class ABRController(AbstractController):
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
         log.debug('Calibrating primary speaker')
-        self.primary_sens = tc.tone_calibration(
+        self.primary_sens = calibration.tone_calibration(
             frequency, self.mic_cal, gain=-40, max_thd=None,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)

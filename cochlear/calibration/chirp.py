@@ -30,22 +30,12 @@ from neurogen.calibration.util import psd, psd_freq
 from neurogen.util import db
 
 from cochlear import nidaqmx as ni
-from cochlear import tone_calibration as tc
-from cochlear import calibration_standard as reference_calibration
-import settings
+from cochlear.calibration import get_chirp_transform
+from cochlear.calibration import standard
+from cochlear import settings
 
 DAC_FS = 200e3
 ADC_FS = 200e3
-
-
-def get_chirp_transform(vrms, start_atten=6, end_atten=-6):
-    calibration_data = np.array([
-        (0, start_atten),
-        (100e3, end_atten),
-    ])
-    frequencies = calibration_data[:, 0]
-    magnitude = calibration_data[:, 1]
-    return InterpCalibration.from_single_vrms(frequencies, magnitude, vrms)
 
 
 class ChirpCalSettings(AbstractParadigm):
@@ -236,36 +226,45 @@ class ChirpCal(HasTraits):
         container = VPlotContainer(padding=70, spacing=40,
                                    bgcolor='transparent')
 
-        plot = create_line_plot((self.data.time, self.data.waveform),
-                                color='black', bgcolor='white')
-        axis = PlotAxis(component=plot, orientation='left',
+        sig_plot = create_line_plot((self.data.time, self.data.waveform),
+                                    color='black', bgcolor='white')
+        axis = PlotAxis(component=sig_plot, orientation='left',
                         title="Cal. sig. (V)")
-        plot.underlays.append(axis)
-        axis = PlotAxis(component=plot, orientation='bottom',
-                        title="Time (msec)")
-        plot.underlays.append(axis)
-        container.insert(0, plot)
+        sig_plot.underlays.append(axis)
+        container.insert(0, sig_plot)
 
         # Overlay the experiment and reference microphone signal
         overlay = OverlayPlotContainer()
         time = self.data.ref_microphone.time
         signal = self.data.ref_microphone.get_average()*1e3
-        plot = create_line_plot((time, signal), color='black')
-        plot.alpha = 0.5
-        axis = PlotAxis(component=plot, orientation='left',
+        ref_plot = create_line_plot((time, signal), color='black')
+        ref_plot.alpha = 0.5
+        axis = PlotAxis(component=ref_plot, orientation='left',
                         title="Ref. mic. signal (mV)")
-        plot.underlays.append(axis)
-        overlay.insert(0, plot)
+        ref_plot.underlays.append(axis)
+        overlay.insert(0, ref_plot)
         time = self.data.exp_microphone.time
         signal = self.data.exp_microphone.get_average()*1e3
-        plot = create_line_plot((time, signal), color='red')
-        axis = PlotAxis(component=plot, orientation='right',
+        exp_plot = create_line_plot((time, signal), color='red')
+        axis = PlotAxis(component=exp_plot, orientation='right',
                         title="Exp. mic. signal (mV)")
-        plot.underlays.append(axis)
-        axis = PlotAxis(component=plot, orientation='bottom',
+        exp_plot.underlays.append(axis)
+        axis = PlotAxis(component=exp_plot, orientation='bottom',
                         title="Time (msec)")
-        plot.underlays.append(axis)
-        overlay.insert(0, plot)
+        exp_plot.underlays.append(axis)
+        zoom = BetterSelectingZoom(component=exp_plot, tool_mode='range',
+                                   always_on=True, axis='index')
+        exp_plot.underlays.append(zoom)
+        pan = PanTool(component=exp_plot, axis='index')
+        exp_plot.tools.append(pan)
+
+        ref_plot.index_mapper = exp_plot.index_mapper
+        sig_plot.index_mapper = exp_plot.index_mapper
+        axis = PlotAxis(component=sig_plot, orientation='bottom',
+                        title="Time (msec)")
+        sig_plot.underlays.append(axis)
+
+        overlay.insert(0, exp_plot)
         container.insert(0, overlay)
 
         frequency = self.data.frequency[1:]
@@ -514,8 +513,7 @@ class ChirpCalController(AbstractController):
         self.stop()
 
     def run_reference_calibration(self, info=None):
-        reference_calibration.launch_gui(parent=info.ui.control,
-                                         kind='livemodal')
+        standard.launch_gui(parent=info.ui.control, kind='livemodal')
 
     def verify_calibration(self, info=None):
         frequency = self.model.data.frequency
@@ -530,9 +528,9 @@ class ChirpCalController(AbstractController):
 
         gains = [-80, -60, -40, -20, 0, 10]
         for f in (1e3, 2e3, 4e3, 8e3, 16e3):
-            sr_cal = tc.tone_calibration_search(f, exp_cal, gains=gains,
+            sr_cal = calibration.tone_calibration_search(f, exp_cal, gains=gains,
                                                 input_line=exp_input)
-            se_cal = tc.tone_calibration_search(f, ref_cal, gains=gains,
+            se_cal = calibration.tone_calibration_search(f, ref_cal, gains=gains,
                                                 input_line=ref_input)
             if sr_cal is not None and se_cal is not None:
                 print f,
