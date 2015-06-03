@@ -1,6 +1,8 @@
 import logging
 log = logging.getLogger(__name__)
 
+import time
+
 from traits.api import (Instance, Float, Int, push_exception_handler, Bool,
                         HasTraits, Str, List, Enum)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
@@ -122,23 +124,21 @@ class ABRController(AbstractController):
     primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
     primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
+    start_time = Float(label='Start time', **kw)
+    end_time = Float(label='End time', **kw)
 
-    current_valid_repetitions = Int(0)
-    current_repetitions = Int(0)
-    current_rejects = Int(0)
+    current_valid_repetitions = Int(0, log=True, dtype=np.int32)
+    current_repetitions = Int(0, log=True, dtype=np.int32)
+    current_rejects = Int(0, log=True, dtype=np.int32)
 
-    adc_fs = Float(ADC_FS)
-    dac_fs = Float(DAC_FS)
+    adc_fs = Float(ADC_FS, **kw)
+    dac_fs = Float(DAC_FS, **kw)
     done = Bool(False)
 
     frequency_changed = Bool(False)
 
     extra_dtypes = [
         ('primary_sens', np.float32),
-        ('primary_spl', np.float32),
-        ('primary_attenuation', np.float32),
-        ('primary_calibration_gain', np.float32),
-        ('total_repetitions', np.float32),
     ]
 
     @depends_on('exp_mic_gain')
@@ -236,6 +236,7 @@ class ABRController(AbstractController):
         self.current_valid_repetitions = 0
         self.current_rejects = 0
 
+        self.start_time = time.time()
         iface_adc.start()
         iface_dac.play_queue()
 
@@ -280,6 +281,8 @@ class ABRController(AbstractController):
                        primary_attenuation=self.primary_attenuation,
                        primary_calibration_gain=self.primary_calibration_gain,
                        total_repetitions=self.current_repetitions,
+                       start_time=self.start_time,
+                       end_time=self.end_time,
                        )
 
     def primary_calibration_gain_callback(self, value):
@@ -340,7 +343,6 @@ class ABRExperiment(AbstractExperiment):
                          width=200,
                          enabled_when='not handler.state=="running"'),
                     Include('context_group'),
-                    label='Paradigm',
                 ),
                 VGroup(
                     Item('handler.primary_calibration_gain',
@@ -385,6 +387,9 @@ class ABRExperiment(AbstractExperiment):
             Action(name='Resume', action='resume',
                    image=ImageResource('player_fwd', icon_dir),
                    enabled_when='handler.state=="paused"'),
+            '-',
+            #Action(name='Log event', action='log_event',
+            #       image=ImageResource('player_fwd', icon_dir)),
         ),
         id='lbhb.ABRExperiment',
     )
@@ -424,6 +429,8 @@ if __name__ == '__main__':
     from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
+
+    configure_logging()
 
     pyni.DAQmxResetDevice('Dev1')
     mic_file = 'c:/data/cochlear/calibration/150407 - calibration with 377C10.mic'

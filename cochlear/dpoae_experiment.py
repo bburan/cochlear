@@ -1,6 +1,8 @@
 import logging
 log = logging.getLogger(__name__)
 
+import time
+
 from traits.api import (Instance, Float, push_exception_handler, Bool, Int,
                         List, HasTraits, Str)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
@@ -91,6 +93,8 @@ class DPOAEParadigm(AbstractParadigm):
     f2_frequency = Expression(
         'u(dp(2.8e3, 22.6e3, 0.5, 1/response_window), f2_level)',
         label='f2 frequency (Hz)', **kw)
+    f2_frequency = Expression(11310, label='f2 frequency (Hz)', **kw)
+
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
     f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
@@ -141,9 +145,13 @@ class DPOAEController(AbstractController):
     secondary_spl = Float(label='Secondary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
     secondary_attenuation = Float(label='Secondary attenuation (dB)', **kw)
+    start_time = Float(label='Start time', **kw)
+    end_time = Float(label='End time', **kw)
+    dpoae_frequency = Float(0, label='DPOAE frequency (Hz)', **kw)
+    dp_frequency = Float(0, label='DP frequency (Hz)', **kw)
 
-    current_valid_repetitions = Int(0)
-    current_repetitions = Int(0)
+    current_valid_repetitions = Int(0, log=True, dtype=np.int32)
+    current_repetitions = Int(0, log=True, dtype=np.int32)
 
     adc_fs = Float(ADC_FS)
     dac_fs = Float(DAC_FS)
@@ -167,23 +175,11 @@ class DPOAEController(AbstractController):
         ('measured_dpoae_nf', np.float32),
         ('primary_sens', np.float32),
         ('secondary_sens', np.float32),
-        ('primary_spl', np.float32),
-        ('secondary_spl', np.float32),
-        ('primary_attenuation', np.float32),
-        ('secondary_attenuation', np.float32),
-        ('primary_calibration_gain', np.float32),
-        ('secondary_calibration_gain', np.float32),
-        ('total_repetitions', np.float32),
-        ('dpoae_frequency', np.float32),
-        ('dp_frequency', np.float32)
+        #('total_repetitions', np.float32),
     ]
-
-    search_gains = [-40, -60, -20]
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
 
-    dpoae_frequency = 0
-    dp_frequency = 0
 
     def next_trial(self, info=None):
         try:
@@ -294,6 +290,7 @@ class DPOAEController(AbstractController):
         self.primary_attenuation, self.secondary_attenuation = \
             self.iface_dac.set_best_attenuations()
 
+        self.start_time = time.time()
         log.debug('Starting ADC acquisition')
         self.iface_adc.start()
         log.debug('Starting DAC playout')
@@ -310,6 +307,7 @@ class DPOAEController(AbstractController):
             self.model.data.save()
 
     def trial_complete(self):
+        self.end_time = time.time()
         self.iface_dac.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
@@ -359,8 +357,8 @@ class DPOAEController(AbstractController):
             secondary_sens=secondary_sens,
             primary_spl=self.primary_spl,
             secondary_spl=self.secondary_spl,
-            primary_attenuation=self.primary_attenuation,
-            secondary_attenuation=self.secondary_attenuation,
+            #primary_attenuation=self.primary_attenuation,
+            #secondary_attenuation=self.secondary_attenuation,
             total_repetitions=self.current_repetitions,
             **results)
 
