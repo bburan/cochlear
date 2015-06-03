@@ -11,6 +11,6 @@ setup(
     requires=['numpy'],
     scripts=[
         'scripts/merge_files.py',
-        'scripts/launcher.py',
+        'scripts/run_cochlear.py',
     ],
 )

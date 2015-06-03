@@ -114,7 +114,7 @@ class ExperimentSetup(HasTraits):
 
     def _get_animals(self):
         return ['Beowulf', 'Tarragon', 'Dill', 'Parsley', 'Cumin', 'Zeera',
-                'Gamun']
+                'Gamun', 'Chantarelle']
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
