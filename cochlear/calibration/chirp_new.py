@@ -24,6 +24,7 @@ from experiment import (icon_dir, AbstractController, AbstractParadigm,
 from experiment.util import get_save_file
 from experiment.channel import FileFilteredEpochChannel
 
+from neurogen import generate_waveform, prepare_for_write
 from neurogen import block_definitions as blocks
 from neurogen.calibration import InterpCalibration, FlatCalibration
 from neurogen.calibration.util import psd, psd_freq
@@ -51,7 +52,7 @@ class BaseChirpCalSettings(AbstractParadigm):
     freq_resolution = Float(50, label='Frequency resolution (Hz)')
     fft_averages = Int(4, label='Number of FFTs', **kw)
     waveform_averages = Int(4, label='Number of chirps per FFT', **kw)
-    ici = Float(0.01, label='Inter-chirp interval', **kw)
+    iti = Float(0.01, label='Inter-chirp interval', **kw)
     start_attenuation = Float(30, label='Start attenuation (dB)', **kw)
     end_attenuation = Float(-30, label='End attenuation (dB)', **kw)
 
@@ -62,14 +63,14 @@ class BaseChirpCalSettings(AbstractParadigm):
                         label='Number of chirps', **kw)
     duration = Property(depends_on='freq_resolution',
                         label='Chirp duration (sec)', **kw)
-    total_duration = Property(depends_on='duration, averages, ici',
+    total_duration = Property(depends_on='duration, averages, iti',
                               label='Total duration (sec)')
 
     def _get_duration(self):
         return 1/self.freq_resolution
 
     def _get_total_duration(self):
-        return (self.duration+self.ici)*self.averages
+        return (self.duration+self.iti)*self.averages
 
     def _get_averages(self):
         return self.fft_averages*self.waveform_averages
@@ -96,7 +97,7 @@ class BaseChirpCalSettings(AbstractParadigm):
         'freq_resolution',
         'fft_averages',
         'waveform_averages',
-        'ici',
+        'iti',
         Item('averages', style='readonly'),
         Item('duration', style='readonly'),
         Item('total_duration', style='readonly'),
@@ -154,7 +155,7 @@ class BaseChirpCalData(AbstractData):
     def _create_microphone_node(self, fs, epoch_duration, which='exp'):
         node_name = '{}_microphone'.format(which)
         if node_name in self.fh.root:
-            self.fh.root._f_get_child(node_name).remove()
+            self.fh.root.get_child(node_name).remove()
         filter_kw = dict(filter_freq_hp=5, filter_freq_lp=80e3,
                          filter_btype='bandpass', filter_order=1)
         node = FileFilteredEpochChannel(node=self.fh.root, name=node_name,
@@ -506,6 +507,37 @@ class BaseChirpCalController(AbstractController):
     fh = Any(None)
     filename = Any
 
+    def get_waveform_chirp(self):
+        # Load the variables
+        freq_lb = self.get_current_value('freq_lb')
+        freq_ub = self.get_current_value('freq_ub')
+        epoch_duration = self.get_current_value('duration')
+        vrms = self.get_current_value('amplitude')
+        rise_time = self.get_current_value('rise_time')
+        start_atten = self.get_current_value('start_attenuation')
+        end_atten = self.get_current_value('end_attenuation')
+        calibration = get_chirp_transform(vrms, start_atten, end_atten)
+
+        # By using an Attenuation calibration and setting tone level to 0, a
+        # sine wave at the given amplitude (as specified in the settings) will
+        # be generated at each frequency as the reference.
+        ramp = blocks.LinearRamp(name='sweep')
+        token = blocks.Tone(name='tone', level=0, frequency=ramp) >> \
+            blocks.Cos2Envelope(name='envelope')
+
+        token.set_value('sweep.ramp_duration', epoch_duration)
+        token.set_value('envelope.duration', epoch_duration)
+        token.set_value('envelope.rise_time', rise_time)
+        token.set_value('sweep.start', freq_lb)
+        token.set_value('sweep.stop', freq_ub)
+
+        return generate_waveform(token, self.dac_fs, duration=epoch_duration,
+                                 calibration=calibration, vrms=vrms)
+
+    def get_waveform(self):
+        a, b = golay_pair(16)
+        return a
+
     def save(self, info=None):
         filename = get_save_file(settings.CALIBRATION_DIR,
                                  'Microphone calibration|*.mic')
@@ -529,7 +561,7 @@ class BaseChirpCalController(AbstractController):
             self._setup_input()
             self._setup_output()
             self.waveforms = []
-            self.iface_dac.play_queue()
+            self.iface_dac.start()
         except Exception as e:
             raise
             if info is not None:
@@ -559,43 +591,21 @@ class BaseChirpCalController(AbstractController):
         self.iface_adc.start()
 
     def _setup_output(self):
-        # Load the variables
+        iti = self.get_current_value('iti')
         output = self.get_current_value('output')
-        freq_lb = self.get_current_value('freq_lb')
-        freq_ub = self.get_current_value('freq_ub')
-        epoch_duration = self.get_current_value('duration')
-        ici = self.get_current_value('ici')
         averages = self.get_current_value('averages')
         output_gain = self.get_current_value('output_gain')
-        vrms = self.get_current_value('amplitude')
-        rise_time = self.get_current_value('rise_time')
-        start_atten = self.get_current_value('start_attenuation')
-        end_atten = self.get_current_value('end_attenuation')
         analog_output = '/{}/{}'.format(ni.DAQmxDefaults.DEV, output)
-        calibration = get_chirp_transform(vrms, start_atten, end_atten)
 
-        self.iface_dac = ni.QueuedDAQmxPlayer(fs=self.dac_fs,
-                                              output_line=analog_output,
-                                              duration=epoch_duration)
-
-        # By using an Attenuation calibration and setting tone level to 0, a
-        # sine wave at the given amplitude (as specified in the settings) will
-        # be generated at each frequency as the reference.
-        ramp = blocks.LinearRamp(name='sweep')
-        channel = blocks.Tone(name='tone', level=0, frequency=ramp) >> \
-            blocks.Cos2Envelope(name='envelope') >> \
-            ni.DAQmxChannel(calibration=calibration)
-
-        channel.set_value('sweep.ramp_duration', epoch_duration)
-        channel.set_value('envelope.duration', epoch_duration)
-        channel.set_value('envelope.rise_time', rise_time)
-        channel.set_value('sweep.start', freq_lb)
-        channel.set_value('sweep.stop', freq_ub)
-        self.iface_dac.add_channel(channel)
-
-        # Set up the desired number of averages
-        self.iface_dac.queue_init('FIFO')
-        self.iface_dac.queue_append(averages, ici)
+        self.waveform = self.get_waveform()
+        duration = self.waveform.shape[-1]/self.dac_fs
+        total_duration = (duration+iti)*averages
+        self.iface_dac = ni.DAQmxPlayer(fs=self.dac_fs,
+                                        total_duration=total_duration,
+                                        allow_regen=True)
+        self.iface_dac.setup()
+        self.iface_dac.write(*prepare_for_write(self.waveform, self.dac_fs,
+                                                iti))
 
         # Configure the attenuation
         self.iface_att = ni.DAQmxAttenControl()
@@ -623,12 +633,11 @@ class EarChirpCalController(BaseChirpCalController):
 
     def finalize(self):
         # This is the chirp waveform
-        waveform = self.iface_dac.realize().ravel()
         waveform_fs = self.iface_dac.fs
         exp_mic_gain = self.get_current_value('exp_mic_gain')
         waveform_averages = self.get_current_value('waveform_averages')
         self.model.data.compute_transfer_functions(waveform_fs,
-                                                   waveform,
+                                                   self.waveform,
                                                    exp_mic_gain,
                                                    waveform_averages,
                                                    self.calibration)
@@ -652,14 +661,14 @@ class ChirpCalController(BaseChirpCalController):
 
     def finalize(self):
         # This is the chirp waveform
-        waveform = self.iface_dac.realize().ravel()
+        #waveform = self.iface_dac.realize().ravel()
         waveform_fs = self.iface_dac.fs
         ref_mic_sens = self.get_current_value('ref_mic_sens')
         ref_mic_gain = self.get_current_value('ref_mic_gain')
         exp_mic_gain = self.get_current_value('exp_mic_gain')
         waveform_averages = self.get_current_value('waveform_averages')
         self.model.data.compute_transfer_functions(waveform_fs,
-                                                   waveform,
+                                                   self.waveform,
                                                    ref_mic_sens,
                                                    ref_mic_gain,
                                                    exp_mic_gain,
@@ -689,6 +698,8 @@ def launch_gui(output='ao0', **kwargs):
 
 
 def main_chirp_cal():
+    import logging
+    logging.basicConfig(level='DEBUG')
     tempfile = os.path.join(settings.TEMP_DIR, 'temp_mic.cal')
     from cochlear import configure_logging
     with tables.open_file(tempfile, 'w') as fh:

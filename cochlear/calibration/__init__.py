@@ -308,3 +308,86 @@ def get_chirp_transform(vrms, start_atten=6, end_atten=-6, start_frequency=0,
     frequencies = [start_frequency, end_frequency]
     magnitude = [start_atten, end_atten]
     return InterpCalibration.from_single_vrms(frequencies, magnitude, vrms)
+
+
+class ChirpCalibration(object):
+
+    def __init__(self, freq_lb, freq_ub, start_atten=0, end_atten=0, vrms=1,
+                 gain=0, repetitions=1, duration=0.1, rise_time=0.1, iti=0.01,
+                 fs=200e3, output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+                 input_line=ni.DAQmxDefaults.MIC_INPUT, callback=None):
+
+        for k, v in locals().items():
+            setattr(self, k, v)
+
+        calibration = get_chirp_transform(vrms, start_atten, end_atten)
+
+        ramp = blocks.LinearRamp(name='sweep')
+        channel = blocks.Tone(name='tone', level=0, frequency=ramp) >> \
+            blocks.Cos2Envelope(name='envelope') >> \
+            ni.DAQmxChannel(calibration=calibration)
+
+        channel.set_value('sweep.ramp_duration', duration)
+        channel.set_value('envelope.duration', duration)
+        channel.set_value('envelope.rise_time', rise_time)
+        channel.set_value('sweep.start', freq_lb)
+        channel.set_value('sweep.stop', freq_ub)
+
+        daq_kw = {
+            'channels': [channel],
+            'repetitions': repetitions,
+            'output_line': output_line,
+            'input_line': input_line,
+            'gain': gain,
+            'adc_fs': fs,
+            'dac_fs': fs,
+            'duration': duration,
+            'iti': iti,
+            'callback': callback,
+        }
+        self.iface_acquire = ni.DAQmxAcquire(**daq_kw)
+
+    def acquire(self):
+        self.iface_acquire.start()
+        self.iface_acquire.join()
+
+    def process(self, fft_window='boxcar'):
+        return self.iface_acquire.waveform_buffer
+
+
+def chirp_power(*args, **kwargs):
+    c = ChirpCalibration(*args, **kwargs)
+    c.acquire()
+    return c.process()
+
+
+class GolayCalibration(object):
+
+    def __init__(self, n, vrms=1, gain=0, repetitions=1, iti=0.01, fs=200e3,
+                 output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+                 input_line=ni.DAQmxDefaults.MIC_INPUT, callback=None):
+
+        for k, v in locals().items():
+            setattr(self, k, v)
+
+        a, b = golay_pair(n)
+        daq_kw = {
+            'channels': [channel],
+            'repetitions': repetitions,
+            'output_line': output_line,
+            'input_line': input_line,
+            'gain': gain,
+            'adc_fs': fs,
+            'dac_fs': fs,
+            'duration': duration,
+            'iti': iti,
+            'callback': callback,
+        }
+        self.iface_acquire = ni.DAQmxAcquire(**daq_kw)
+
+    def acquire(self):
+        self.iface_acquire.start()
+        self.iface_acquire.join()
+
+    def process(self, fft_window='boxcar'):
+        return self.iface_acquire.waveform_buffer

@@ -18,6 +18,7 @@ import numpy as np
 from neurogen.channel import Channel
 from neurogen.player import ContinuousPlayer, QueuedPlayer
 from neurogen.blocks import ScalarInput
+from neurogen import prepare_for_write
 
 import threading
 
@@ -309,29 +310,36 @@ def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
     return task_analog, task_record, cb_ptr
 
 
-def create_continuous_ao(ao, trigger, run, fs,
-                         expected_range=DAQmxDefaults.AO_RANGE, callback=None,
-                         callback_samples=None, duration=None,
-                         done_callback=None, task_analog=None,
-                         task_digital=None):
-    if task_analog is None:
-        task_analog = create_task()
-    if task_digital is None:
-        task_digital = create_task()
+def create_ao(ao, trigger, run, fs, expected_range=DAQmxDefaults.AO_RANGE,
+              callback=None, callback_samples=None, duration=None,
+              done_callback=None, allow_regen=False):
+
+    task_analog = create_task()
+    task_digital = create_task()
     vmin, vmax = -expected_range, expected_range
+
+    regen_mode = ni.DAQmx_Val_AllowRegen if allow_regen \
+        else ni.DAQmx_Val_DoNotAllowRegen
 
     # Setup analog output and prevent playout of data that has already been
     # played.
     ni.DAQmxCreateAOVoltageChan(task_analog, ao, '', vmin, vmax,
                                 ni.DAQmx_Val_Volts, '')
-    ni.DAQmxSetWriteRegenMode(task_analog, ni.DAQmx_Val_DoNotAllowRegen)
+    ni.DAQmxSetWriteRegenMode(task_analog, regen_mode)
 
     if duration is None:
-        args = ni.DAQmx_Val_ContSamps, int(fs)
+        print 'duration is None'
+        ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
+                                 ni.DAQmx_Val_ContSamps, int(fs))
+        output_buffer_size = int(fs*10)
+        ni.DAQmxCfgOutputBuffer(task_analog, int(fs*10))
+        log.debug('Configured continuous output with output buffer size %d',
+                  output_buffer_size)
     else:
-        args = ni.DAQmx_Val_FiniteSamps, int(duration*fs)
-    ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising, *args)
-    ni.DAQmxCfgOutputBuffer(task_analog, int(fs*10))
+        output_samples = int(duration*fs)
+        log.debug('Configured finite output with %d samples', output_samples)
+        ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
+                                 ni.DAQmx_Val_FiniteSamps, output_samples)
 
     # Set up trigger line, ensuring that trigger and run lines are at LOW (in
     # case previous task aborted before the zero samples were written out).
@@ -341,7 +349,7 @@ def create_continuous_ao(ao, trigger, run, fs,
                               ni.DAQmx_Val_GroupByChannel,
                               np.array([0, 0], dtype=np.uint8),
                               ctypes.c_int32(), None)
-    ni.DAQmxSetWriteRegenMode(task_digital, ni.DAQmx_Val_DoNotAllowRegen)
+    ni.DAQmxSetWriteRegenMode(task_digital, regen_mode)
     ni.DAQmxCfgSampClkTiming(task_digital, 'ao/SampleClock', fs,
                              ni.DAQmx_Val_Rising, ni.DAQmx_Val_ContSamps,
                              int(fs))
@@ -360,7 +368,6 @@ def create_continuous_ao(ao, trigger, run, fs,
     # Commit the tasks so we can catch resource errors early
     ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
     ni.DAQmxTaskControl(task_digital, ni.DAQmx_Val_Task_Commit)
-
 
     # Log configuration info regarding task
     result = ctypes.c_uint32()
@@ -482,7 +489,7 @@ class DAQmxBase(object):
         super(DAQmxBase, self).__init__(*args, **kwargs)
 
     def start(self):
-        log.debug('Starting %s', self)
+        log.debug('Starting %s', self.__class__.__name__)
         if self._state == 'uninitialized':
             self.setup()
         self._state = 'running'
@@ -502,7 +509,7 @@ class DAQmxBase(object):
             self.complete_callback()
 
     def clear(self):
-        log.debug('Clearing %s', self)
+        log.debug('Clearing %s', self.__class__.__name__)
         for task in self._tasks:
             try:
                 ni.DAQmxClearTask(task)
@@ -511,7 +518,7 @@ class DAQmxBase(object):
         self._state = 'uninitialized'
 
     def setup(self):
-        log.debug('Setting up %s', self)
+        log.debug('Setting up %s', self.__class__.__name__)
         self._state = 'initialized'
 
     def __del__(self):
@@ -714,7 +721,7 @@ class DAQmxChannel(Channel):
         return self.attenuator.get_nearest_atten(atten)
 
 
-class AbstractDAQmxPlayer(DAQmxBase):
+class DAQmxPlayer(DAQmxBase):
 
     def __init__(self, fs=200e3,
                  output_line=DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
@@ -722,7 +729,7 @@ class AbstractDAQmxPlayer(DAQmxBase):
                  trigger_line=DAQmxDefaults.AO_TRIGGER,
                  run_line=DAQmxDefaults.AO_RUN, attenuator=None,
                  buffer_size=2, monitor_interval=0.5, total_duration=None,
-                 done_callback=None, **kwargs):
+                 done_callback=None, allow_regen=False, **kwargs):
         '''
         Parameters
         ----------
@@ -737,7 +744,7 @@ class AbstractDAQmxPlayer(DAQmxBase):
         kwargs = variables.pop('kwargs')
         for k, v in variables.items():
             setattr(self, k, v)
-        super(AbstractDAQmxPlayer, self).__init__(**kwargs)
+        super(DAQmxPlayer, self).__init__(**kwargs)
 
     def setup(self):
         log.debug('Setting up AO tasks')
@@ -745,12 +752,23 @@ class AbstractDAQmxPlayer(DAQmxBase):
         self.monitor_samples = int(self.fs*self.monitor_interval)
         log.debug('Buffer size %d, monitor every %d samples',
                   self.buffer_samples, self.monitor_samples)
+
+        kwargs = {}
+        if hasattr(self, 'callback') and self.monitor_interval is not None:
+            kwargs['callback'] = self.callback
+            kwargs['callback_samples'] = self.callback_samples
+        kwargs['allow_regen'] = getattr(self, 'allow_regen', False)
+
         self._task_analog, self._task_digital, self._cb_ptr, \
-            self._done_cb_ptr = create_continuous_ao(
-                self.output_line, self.trigger_line, self.run_line, self.fs,
-                self.expected_range, callback=self.monitor,
-                callback_samples=self.monitor_samples,
-                duration=self.total_duration, done_callback=self._done_callback)
+            self._done_cb_ptr = create_ao(
+                self.output_line,
+                self.trigger_line,
+                self.run_line,
+                self.fs,
+                self.expected_range,
+                duration=self.total_duration,
+                done_callback=self._done_callback,
+                **kwargs)
 
         # Order is important.  Digital task needs to be started before analog
         # task.
@@ -758,7 +776,7 @@ class AbstractDAQmxPlayer(DAQmxBase):
         self.samples_written = 0
         self.nchannels = num_channels(self._task_analog)
         log.debug('Configured AO with %d channels', self.nchannels)
-        super(AbstractDAQmxPlayer, self).setup()
+        super(DAQmxPlayer, self).setup()
 
     def get_write_size(self):
         if self._state == 'halted':
@@ -775,6 +793,12 @@ class AbstractDAQmxPlayer(DAQmxBase):
                   '%d samples to add to buffer',
                   self.samples_written, result.value, write_size)
         return write_size
+
+    def simple_write(self, analog, iti,
+                     trigger_duration=DAQmxDefaults.TRIGGER_DURATION):
+        analog, trigger, running = prepare_for_write(analog, self.fs, iti,
+                                                     trigger_duration)
+        return self.write(analog, trigger, running)
 
     def write(self, analog, trigger, running):
         analog = np.asarray(analog)
@@ -827,15 +851,42 @@ class AbstractDAQmxPlayer(DAQmxBase):
             self.done_callback()
 
 
-class QueuedDAQmxPlayer(AbstractDAQmxPlayer, QueuedPlayer):
+class QueuedDAQmxPlayer(DAQmxPlayer, QueuedPlayer):
+
     pass
 
 
-class ContinuousDAQmxPlayer(AbstractDAQmxPlayer, ContinuousPlayer):
+class ContinuousDAQmxPlayer(DAQmxPlayer, ContinuousPlayer):
 
     def clear(self):
         super(ContinuousDAQmxPlayer, self).clear()
         self.reset()
+
+
+class DAQmxOutput(DAQmxBase):
+
+    def __init__(self, fs=200e3,
+                 output_line=DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
+                 expected_range=DAQmxDefaults.AO_RANGE,
+                 trigger_line=DAQmxDefaults.AO_TRIGGER,
+                 run_line=DAQmxDefaults.AO_RUN, attenuator=None,
+                 buffer_size=2, monitor_interval=0.5, total_duration=None,
+                 done_callback=None, **kwargs):
+        '''
+        Parameters
+        ----------
+        buffer_size : float, sec
+            Number of samples available to niDAQmx for playout.  The larger this
+            value, the longer it takes for changes to be applied.  Smaller
+            values have a greater risk of not keeping up with playout.
+        monitor_interval : float, sec
+            How often should new samples be uploaded to the buffer?
+        '''
+        variables = locals()
+        kwargs = variables.pop('kwargs')
+        for k, v in variables.items():
+            setattr(self, k, v)
+        super(DAQmxPlayer, self).__init__(**kwargs)
 
 
 class DAQmxAttenControl(DAQmxBase):
@@ -890,7 +941,7 @@ class DAQmxAttenControl(DAQmxBase):
         self._left_setting = None
         super(DAQmxAttenControl, self).__init__()
 
-    def setup(self):
+    def setup(self, gain=-np.inf):
         # Configure the tasks and IO lines
         log.debug('Configuring NI tasks')
         self._task_mute = create_task()
@@ -915,7 +966,10 @@ class DAQmxAttenControl(DAQmxBase):
         # Use the soft mute option
         self.set_mute(False)
         self.set_zero_crossing(False)
-        self.set_atten(np.inf, np.inf)
+        if np.isscalar(gain):
+            self.set_gains(gain)
+        else:
+            self.set_gain(*gain)
         super(DAQmxAttenControl, self).setup()
 
     def start(self):
@@ -1189,11 +1243,156 @@ def acquire(*args, **kwargs):
     return daq.waveform_buffer
 
 
+class SimpleDAQmxAcquire(object):
+
+    def __init__(self, waveform, repetitions, output_line, input_line, gain,
+                 dac_fs=100e3, adc_fs=100e3, iti=0.01, input_range=10,
+                 callback=None):
+
+        log.debug('Setting up acquisition')
+        for k, v in locals().items():
+            setattr(self, k, v)
+
+        self.complete = False
+        self.waveforms = []
+        self.epochs_acquired = 0
+
+        waveform_duration = waveform.shape[-1]/dac_fs
+        trial_duration = waveform_duration+iti
+        total_duration = trial_duration*repetitions
+        epoch_duration = trial_duration-adc_fs**-1
+
+        # Set up the recording
+        self.iface_adc = TriggeredDAQmxSource(fs=adc_fs,
+                                              epoch_duration=epoch_duration,
+                                              input_line=input_line,
+                                              expected_range=input_range,
+                                              callback=self.poll)
+        self.iface_atten = DAQmxAttenControl()
+        self.iface_atten.setup(gain)
+
+        self.iface_dac = DAQmxPlayer(fs=dac_fs, total_duration=total_duration,
+                                     output_line=output_line, allow_regen=True)
+        self.iface_dac.setup()
+        self.iface_dac.simple_write(waveform, iti)
+
+    def start(self):
+        log.debug('Starting acquisition')
+        self.iface_adc.start()
+        self.iface_dac.start()
+
+    def stop(self):
+        self.iface_adc.clear()
+        self.iface_dac.clear()
+
+    def join(self):
+        while not self.complete:
+            time.sleep(0.1)
+
+    def poll(self, waveforms):
+        log.debug('Received data')
+        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
+        print waveforms.shape
+        self.waveforms.append(waveforms)
+        self.epochs_acquired += len(waveforms)
+        if self.epochs_acquired >= self.repetitions:
+            log.debug('Halting acquisition')
+            self.stop()
+            self.complete = True
+        if self.callback is not None:
+            self.callback(self.epochs_acquired, self.complete)
+        log.debug('Completed processing received data')
+
+
+def simple_acquire(waveform, fs, repetitions, input_line, iti,
+                   trigger_duration=0.01, epoch_size=None):
+
+    waveform_duration = len(waveform)/fs
+    trial_duration = waveform_duration+iti
+    total_duration = trial_duration*repetitions
+
+    # Set epoch size to just smaller than the trial duration to ensure that the
+    # trigger has time to rearm before the next acquisition.
+    if epoch_size is None:
+        epoch_size = trial_duration-0.001
+
+    iti_samples = np.int(fs*iti)
+    trigger_samples = np.int(fs*trigger_duration)
+
+    running = np.ones_like(waveform)
+    trigger = np.zeros_like(waveform)
+    trigger[:trigger_samples] = 1
+
+    waveform = np.pad(waveform, (0, iti_samples), 'constant')
+    running = np.pad(running, (0, iti_samples), 'constant')
+    trigger = np.pad(trigger, (0, iti_samples), 'constant')
+
+    def poll(waveforms):
+        print 'acquired', waveforms.shape
+
+    acq = TriggeredDAQmxSource(fs=fs, epoch_duration=epoch_size,
+                               input_line='/Dev1/ai1', callback=poll)
+    player = DAQmxPlayer(fs=fs, total_duration=total_duration, allow_regen=True)
+    player.setup()
+    acq.setup()
+    player.write(waveform, trigger, running)
+    acq.start()
+    player.start()
+    while True:
+        import time
+        time.sleep(0.5)
+
+
+def main_golay():
+    from neurogen.calibration.util import golay_pair, golay_transfer_function
+    a, b = golay_pair(16)
+    fs = 200e3
+    kwargs = dict(repetitions=10, output_line='/Dev1/ao0',
+                  input_line=DAQmxDefaults.MIC_INPUT, gain=0, dac_fs=fs,
+                  adc_fs=fs, iti=0.001)
+
+    acq = SimpleDAQmxAcquire(a, **kwargs)
+    acq.start()
+    acq.join()
+    a_resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
+
+    acq = SimpleDAQmxAcquire(b, **kwargs)
+    acq.start()
+    acq.join()
+    b_resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
+
+    freq, psd = golay_transfer_function(a, b, a_resp, b_resp, fs)
+
+    import pylab as pl
+    pl.semilogx(freq, np.log10(psd))
+    pl.axis(xmin=100, xmax=100000)
+    pl.show()
+
+
+def main_chirp():
+    from neurogen.calibration.util import transfer_function
+    import scipy.signal
+    fs = 200e3
+    t = np.arange(0.2*fs)/fs
+    y = scipy.signal.chirp(t, 100, 0.2, 60e3)
+    kwargs = dict(repetitions=10, output_line='/Dev1/ao0',
+                  input_line=DAQmxDefaults.MIC_INPUT, gain=-10, dac_fs=fs,
+                  adc_fs=fs, iti=0.001)
+
+    acq = SimpleDAQmxAcquire(y, **kwargs)
+    acq.start()
+    acq.join()
+    resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
+
+    freq, psd = transfer_function(y, resp, fs)
+
+    import pylab as pl
+    #pl.plot(t, y, 'k-')
+    pl.semilogx(freq, np.log10(psd))
+    pl.axis(xmin=100, xmax=100000)
+
+
 if __name__ == '__main__':
-    import logging.config
-    logging.basicConfig(level='DEBUG')
-    import time
-    atten = DAQmxAttenControl()
-    atten.setup()
-    atten.set_mute(True)
-    atten.set_gain(-30.5, 30.5)
+    main_chirp()
+    main_golay()
+    pl.show()
