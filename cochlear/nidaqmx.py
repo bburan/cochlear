@@ -328,7 +328,6 @@ def create_ao(ao, trigger, run, fs, expected_range=DAQmxDefaults.AO_RANGE,
     ni.DAQmxSetWriteRegenMode(task_analog, regen_mode)
 
     if duration is None:
-        print 'duration is None'
         ni.DAQmxCfgSampClkTiming(task_analog, '', fs, ni.DAQmx_Val_Rising,
                                  ni.DAQmx_Val_ContSamps, int(fs))
         output_buffer_size = int(fs*10)
@@ -754,9 +753,9 @@ class DAQmxPlayer(DAQmxBase):
                   self.buffer_samples, self.monitor_samples)
 
         kwargs = {}
-        if hasattr(self, 'callback') and self.monitor_interval is not None:
-            kwargs['callback'] = self.callback
-            kwargs['callback_samples'] = self.callback_samples
+        if hasattr(self, 'monitor') and self.monitor_interval is not None:
+            kwargs['callback'] = self.monitor
+            kwargs['callback_samples'] = self.monitor_samples
         kwargs['allow_regen'] = getattr(self, 'allow_regen', False)
 
         self._task_analog, self._task_digital, self._cb_ptr, \
@@ -1292,7 +1291,6 @@ class SimpleDAQmxAcquire(object):
     def poll(self, waveforms):
         log.debug('Received data')
         lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
-        print waveforms.shape
         self.waveforms.append(waveforms)
         self.epochs_acquired += len(waveforms)
         if self.epochs_acquired >= self.repetitions:
