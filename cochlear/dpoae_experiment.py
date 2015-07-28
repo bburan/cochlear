@@ -99,13 +99,13 @@ class DPOAEParadigm(AbstractParadigm):
     f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
                           label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
-    response_window = Expression('100e-3', label='Response window (s)', **kw)
+    response_window = Expression('50e-3', label='Response window (s)', **kw)
     exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
 
     # Signal acquisition settings.  Increasing time_averages increases SNR by
     # sqrt(N).  Increasing spectral averages reduces variance of result.  EPL
     # uses 8&4.
-    time_averages = Float(16, label='Time avg. (decr. noise floor)', **kw)
+    time_averages = Float(8, label='Time avg. (decr. noise floor)', **kw)
     spectrum_averages = Float(4, label='Spectrum avg. (decr. variability)',
                               **kw)
 

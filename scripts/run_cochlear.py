@@ -23,8 +23,13 @@ from cochlear import dpoae_experiment
 class ExperimentController(Controller):
 
     def run_microphone_calibration(self, info):
-        chirp.launch_gui('ao0', parent=info.ui.control, kind='livemodal')
+        chirp.reference_calibration(parent=info.ui.control, kind='livemodal')
         info.object._update_calibrations()
+
+    def run_hrtf_calibration(self, info):
+        filename = self._get_filename(info, 'HRTF')
+        chirp.hrtf_calibration(info.object.mic_cal, filename=filename,
+                               parent=info.ui.control, kind='livemodal')
 
     def _get_filename(self, info, experiment):
         datetime = dt.datetime.now()
@@ -113,8 +118,7 @@ class ExperimentSetup(HasTraits):
         return ['Brad', 'Stephen']
 
     def _get_animals(self):
-        return ['Beowulf', 'Tarragon', 'Dill', 'Parsley', 'Cumin', 'Zeera',
-                'Gamun', 'Chantarelle']
+        return ['Beowulf', 'Oghul']
 
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
@@ -137,6 +141,9 @@ class ExperimentSetup(HasTraits):
             Action(name='Mic cal',
                    image=ImageResource('media_record', icon_dir),
                    action='run_microphone_calibration'),
+            Action(name='HRTF',
+                   image=ImageResource('media_record', icon_dir),
+                   action='run_hrtf_calibration'),
             Action(name='ABR',
                    image=ImageResource('view_statistics', icon_dir),
                    enabled_when='mic_cal is not None '

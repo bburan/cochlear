@@ -43,6 +43,7 @@ class DAQmxDefaults(object):
     ERP_INPUT = '/{}/ai3'.format(DEV)
     MIC_INPUT = '/{}/ai1'.format(DEV)
     REF_MIC_INPUT = '/{}/ai2'.format(DEV)
+    DUAL_MIC_INPUT = ','.join((MIC_INPUT, REF_MIC_INPUT))
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
     AI_TRIGGER = '/{}/PFI0'.format(DEV)
@@ -1167,7 +1168,42 @@ class DAQmxAttenControl(DAQmxBase):
 ################################################################################
 # Primary helpers for DAQ
 ################################################################################
-class DAQmxAcquire(object):
+class BaseDAQmxAcquire(object):
+
+    def stop(self):
+        self.iface_adc.clear()
+        self.iface_dac.clear()
+
+    def join(self):
+        while not self.complete:
+            time.sleep(0.1)
+
+    def poll(self, waveforms):
+        log.debug('Received data')
+        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
+        self.waveforms.append(waveforms)
+        self.epochs_acquired += len(waveforms)
+        if self.epochs_acquired >= self.repetitions:
+            log.debug('Halting acquisition')
+            self.stop()
+            self.complete = True
+        if self.callback is not None:
+            self.callback(self.epochs_acquired, self.complete)
+        log.debug('Completed processing received data')
+
+    def get_waveforms(self, remove_iti=False):
+        waveforms = np.concatenate(self.waveforms, axis=0)
+        if remove_iti:
+            # Subtract one from the trim because the DAQmx interface is
+            # configured to acquire one sample less than
+            # int(waveform_duration+iti).  This allows the card to be reset
+            # properly so it can acquire on the next trigger.
+            trim_samples = int(self.iti*self.adc_fs)-1
+            waveforms = waveforms[..., :-trim_samples]
+        return waveforms
+
+
+class DAQmxAcquire(BaseDAQmxAcquire):
 
     def __init__(self, channels, repetitions, output_line, input_line, gain,
                  dac_fs=100e3, adc_fs=100e3, duration=1, iti=0.01,
@@ -1213,36 +1249,15 @@ class DAQmxAcquire(object):
         log.debug('Starting acquisition')
         self.iface_dac.play_queue()
 
-    def stop(self):
-        self.iface_adc.clear()
-        self.iface_dac.clear()
-
-    def join(self):
-        while not self.complete:
-            time.sleep(0.1)
-
-    def poll(self, waveforms):
-        log.debug('Received data')
-        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
-        self.waveform_buffer[lb:ub, :, :] = waveforms
-        self.epochs_acquired += len(waveforms)
-        if self.epochs_acquired >= self.repetitions:
-            log.debug('Halting acquisition')
-            self.stop()
-            self.complete = True
-        if self.callback is not None:
-            self.callback(self.epochs_acquired, self.complete)
-        log.debug('Completed processing received data')
-
 
 def acquire(*args, **kwargs):
     daq = DAQmxAcquire(*args, **kwargs)
     daq.start()
     daq.join()
-    return daq.waveform_buffer
+    return daq.get_waveforms()
 
 
-class SimpleDAQmxAcquire(object):
+class DAQmxAcquireWaveform(BaseDAQmxAcquire):
 
     def __init__(self, waveform, repetitions, output_line, input_line, gain,
                  dac_fs=100e3, adc_fs=100e3, iti=0.01, input_range=10,
@@ -1269,7 +1284,6 @@ class SimpleDAQmxAcquire(object):
                                               callback=self.poll)
         self.iface_atten = DAQmxAttenControl()
         self.iface_atten.setup(gain)
-
         self.iface_dac = DAQmxPlayer(fs=dac_fs, total_duration=total_duration,
                                      output_line=output_line, allow_regen=True)
         self.iface_dac.setup()
@@ -1280,117 +1294,9 @@ class SimpleDAQmxAcquire(object):
         self.iface_adc.start()
         self.iface_dac.start()
 
-    def stop(self):
-        self.iface_adc.clear()
-        self.iface_dac.clear()
 
-    def join(self):
-        while not self.complete:
-            time.sleep(0.1)
-
-    def poll(self, waveforms):
-        log.debug('Received data')
-        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
-        self.waveforms.append(waveforms)
-        self.epochs_acquired += len(waveforms)
-        if self.epochs_acquired >= self.repetitions:
-            log.debug('Halting acquisition')
-            self.stop()
-            self.complete = True
-        if self.callback is not None:
-            self.callback(self.epochs_acquired, self.complete)
-        log.debug('Completed processing received data')
-
-
-def simple_acquire(waveform, fs, repetitions, input_line, iti,
-                   trigger_duration=0.01, epoch_size=None):
-
-    waveform_duration = len(waveform)/fs
-    trial_duration = waveform_duration+iti
-    total_duration = trial_duration*repetitions
-
-    # Set epoch size to just smaller than the trial duration to ensure that the
-    # trigger has time to rearm before the next acquisition.
-    if epoch_size is None:
-        epoch_size = trial_duration-0.001
-
-    iti_samples = np.int(fs*iti)
-    trigger_samples = np.int(fs*trigger_duration)
-
-    running = np.ones_like(waveform)
-    trigger = np.zeros_like(waveform)
-    trigger[:trigger_samples] = 1
-
-    waveform = np.pad(waveform, (0, iti_samples), 'constant')
-    running = np.pad(running, (0, iti_samples), 'constant')
-    trigger = np.pad(trigger, (0, iti_samples), 'constant')
-
-    def poll(waveforms):
-        print 'acquired', waveforms.shape
-
-    acq = TriggeredDAQmxSource(fs=fs, epoch_duration=epoch_size,
-                               input_line='/Dev1/ai1', callback=poll)
-    player = DAQmxPlayer(fs=fs, total_duration=total_duration, allow_regen=True)
-    player.setup()
-    acq.setup()
-    player.write(waveform, trigger, running)
-    acq.start()
-    player.start()
-    while True:
-        import time
-        time.sleep(0.5)
-
-
-def main_golay():
-    from neurogen.calibration.util import golay_pair, golay_transfer_function
-    a, b = golay_pair(16)
-    fs = 200e3
-    kwargs = dict(repetitions=10, output_line='/Dev1/ao0',
-                  input_line=DAQmxDefaults.MIC_INPUT, gain=0, dac_fs=fs,
-                  adc_fs=fs, iti=0.001)
-
-    acq = SimpleDAQmxAcquire(a, **kwargs)
-    acq.start()
-    acq.join()
-    a_resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
-
-    acq = SimpleDAQmxAcquire(b, **kwargs)
-    acq.start()
-    acq.join()
-    b_resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
-
-    freq, psd = golay_transfer_function(a, b, a_resp, b_resp, fs)
-
-    import pylab as pl
-    pl.semilogx(freq, np.log10(psd))
-    pl.axis(xmin=100, xmax=100000)
-    pl.show()
-
-
-def main_chirp():
-    from neurogen.calibration.util import transfer_function
-    import scipy.signal
-    fs = 200e3
-    t = np.arange(0.2*fs)/fs
-    y = scipy.signal.chirp(t, 100, 0.2, 60e3)
-    kwargs = dict(repetitions=10, output_line='/Dev1/ao0',
-                  input_line=DAQmxDefaults.MIC_INPUT, gain=-10, dac_fs=fs,
-                  adc_fs=fs, iti=0.001)
-
-    acq = SimpleDAQmxAcquire(y, **kwargs)
-    acq.start()
-    acq.join()
-    resp = np.concatenate(acq.waveforms).mean(axis=0)[0]
-
-    freq, psd = transfer_function(y, resp, fs)
-
-    import pylab as pl
-    #pl.plot(t, y, 'k-')
-    pl.semilogx(freq, np.log10(psd))
-    pl.axis(xmin=100, xmax=100000)
-
-
-if __name__ == '__main__':
-    main_chirp()
-    main_golay()
-    pl.show()
+def acquire_waveform(*args, **kwargs):
+    daq = DAQmxAcquireWaveform(*args, **kwargs)
+    daq.start()
+    daq.join()
+    return daq.get_waveforms()
