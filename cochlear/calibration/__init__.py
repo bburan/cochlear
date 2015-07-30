@@ -1,17 +1,17 @@
 import logging
 log = logging.getLogger(__name__)
 
+import threading
+
 import numpy as np
-from scipy import signal
 
 from neurogen import block_definitions as blocks
 from neurogen.calibration import (PointCalibration, InterpCalibration,
                                   CalibrationError, CalibrationTHDError,
                                   CalibrationNFError)
 from neurogen import generate_waveform
-from neurogen.util import db, dbi
-from neurogen.calibration.util import (analyze_mic_sens, analyze_tone,
-                                       tone_power_conv, psd, psd_freq, thd,
+from neurogen.util import db
+from neurogen.calibration.util import (tone_power_conv, psd, psd_freq, thd,
                                        golay_pair, golay_transfer_function)
 
 from .. import nidaqmx as ni
@@ -118,6 +118,16 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
     log.debug(mesg.format(output_spl, frequency, gain, vrms))
     output_sens = _to_sens(output_spl, gain, vrms)
     return PointCalibration(frequency, output_sens)
+
+
+def tone_ref_calibration(frequency, gain, input_line=ni.DAQmxDefaults.MIC_INPUT,
+                         reference_line=ni.DAQmxDefaults.REF_MIC_INPUT,
+                         ref_mic_sens=0.922e-3, *args, **kwargs):
+
+    kwargs['input_line'] = ','.join((input_line, reference_line))
+    mic, ref_mic = db(tone_power(frequency, gain, *args, **kwargs))
+    sens = mic+db(ref_mic_sens)-ref_mic
+    return sens
 
 
 def tone_calibration_search(frequency, input_calibration, gains, vrms=1,
@@ -275,7 +285,7 @@ def ceiling_spl(frequency, max_spl=80, initial_gain=-40, vrms=1, spl_step=5,
     if ceiling_spl is None:
         raise CalibrationError('Could not determine maximum SPL')
 
-    mesg ='Maximum output at {:.1f}Hz is {:.1f}dB SPL'
+    mesg = 'Maximum output at {:.1f}Hz is {:.1f}dB SPL'
     log.debug(mesg.format(frequency, ceiling_spl))
     return ceiling_spl
 
@@ -371,14 +381,17 @@ class ChirpCalibration(object):
         mic_waveforms = self.iface_acquire.get_waveforms(remove_iti=True)
         if mic_waveforms.shape[-1] != self.sig_waveform.shape[-1]:
             raise ValueError('shapes do not match')
-        mic_frequency = psd_freq(mic_waveforms[0,0,:], self.fs)
+
+        if input_gains is not None:
+            # Correct for measurement gain settings
+            input_gains = np.asarray(input_gains)[..., np.newaxis]
+            mic_waveforms = mic_waveforms/input_gains
+
+        mic_frequency = psd_freq(mic_waveforms[0, 0, :], self.fs)
         sig_frequency = psd_freq(self.sig_waveform, self.fs)
         mic_psd = psd(mic_waveforms, self.fs, fft_window, waveform_averages)
         sig_psd = psd(self.sig_waveform, self.fs, fft_window)
 
-        if input_gains is not None:
-            # Correct for measurement gain settings
-            mic_psd = mic_psd/np.asarray(input_gains)[..., np.newaxis]
         mic_psd = mic_psd.mean(axis=0)
 
         return {
@@ -401,7 +414,8 @@ def chirp_power(waveform_averages=4, fft_window='boxcar', **kwargs):
 
 class GolayCalibration(object):
 
-    def __init__(self, n=16, vrms=1, gain=0, repetitions=1, iti=0.01, fs=200e3,
+    def __init__(self, n=16, vrms=1, gain=0, repetitions=1, iti=0.01,
+                 ab_delay=2,  fs=200e3,
                  output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
                  input_line=ni.DAQmxDefaults.MIC_INPUT, callback=None):
 
@@ -414,32 +428,90 @@ class GolayCalibration(object):
             'adc_fs': fs,
             'dac_fs': fs,
             'iti': iti,
-            'callback': callback,
+            'callback': self.poll,
         }
+        self.running = None
+        self.callback = callback
+        self.ab_delay = ab_delay
         self.fs = fs
 
-    def acquire(self):
-        iface_acquire = ni.DAQmxAcquireWaveform(waveform=self.a, **self.daq_kw)
-        iface_acquire.start()
-        iface_acquire.join()
-        self.a_waveforms = iface_acquire.get_waveforms(remove_iti=True)
+    def poll(self, epochs_acquired, complete):
+        if complete and self.running == 'a':
+                self.a_waveforms = \
+                    self.iface_acquire.get_waveforms(remove_iti=True)
+                self.callback(epochs_acquired, False)
+                threading.Timer(self.ab_delay, self.acquire_b).start()
+        elif complete and self.running == 'b':
+                self.b_waveforms = \
+                    self.iface_acquire.get_waveforms(remove_iti=True)
+                self.callback(epochs_acquired, True)
+        else:
+            self.callback(epochs_acquired, False)
 
-        iface_acquire = ni.DAQmxAcquireWaveform(waveform=self.b, **self.daq_kw)
-        iface_acquire.start()
-        iface_acquire.join()
-        self.b_waveforms = iface_acquire.get_waveforms(remove_iti=True)
+    def acquire(self, join=True):
+        self.acquire_a()
 
-    def process(self):
-        freq, tf = golay_transfer_function(self.a, self.b, self.a_waveforms,
-                                           self.b_waveforms, self.fs)
-        return {
-            'a': self.a,
-            'b': self.b,
-            'a_waveform': self.a_waveforms,
-            'b_waveform': self.b_waveforms,
-            'tf': tf,
-            'mic_frequency': freq
-        }
+    def acquire_a(self):
+        self.running = 'a'
+        self.iface_acquire = \
+            ni.DAQmxAcquireWaveform(waveform=self.a, **self.daq_kw)
+        self.iface_acquire.start()
+
+    def acquire_b(self):
+        self.running = 'b'
+        self.iface_acquire = \
+            ni.DAQmxAcquireWaveform(waveform=self.b, **self.daq_kw)
+        self.iface_acquire.start()
+
+    def process(self, waveform_averages, input_gains=None, discard=1,
+                smoothing_window=5):
+        result = summarize_golay(self.fs, self.a, self.b,
+                                 self.a_waveforms[discard:],
+                                 self.b_waveforms[discard:],
+                                 waveform_averages,
+                                 input_gains)
+        mic_waveforms = np.concatenate((self.a_waveforms, self.b_waveforms),
+                                       axis=-1)
+        sig_waveform = np.concatenate((self.a, self.b), axis=-1)
+        sig_psd = psd(sig_waveform, self.fs)
+        sig_frequency = psd_freq(sig_waveform, self.fs)
+
+        result.update({
+            'mic_waveforms': mic_waveforms,
+            'sig_waveform': sig_waveform,
+            'sig_psd': sig_psd,
+            'sig_frequency': sig_frequency,
+        })
+        return result
+
+
+def summarize_golay(fs, a, b, a_response, b_response, waveform_averages=None,
+                    input_gains=None):
+    n_epochs, n_channels, n_time = a_response.shape
+    if waveform_averages is not None:
+        new_shape = (waveform_averages, -1, n_channels, n_time)
+        a_response = a_response.reshape(new_shape).mean(axis=0)
+        b_response = b_response.reshape(new_shape).mean(axis=0)
+    if input_gains is not None:
+        # Correct for measurement gain settings
+        input_gains = np.asarray(input_gains)[..., np.newaxis]
+        a_response = a_response/input_gains
+        b_response = b_response/input_gains
+
+    time = np.arange(a_response.shape[-1])/fs
+    freq, tf = golay_transfer_function(a, b, a_response, b_response, fs)
+    tf = tf.mean(axis=0)
+
+    return {
+        'fs': fs,
+        'a': a,
+        'b': b,
+        'a_response': a_response,
+        'b_response': b_response,
+        'time': time,
+        'tf': tf,
+        'mic_frequency': freq,
+    }
 
 
 def golay_tf(*args, **kwargs):

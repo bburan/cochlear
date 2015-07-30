@@ -302,6 +302,10 @@ def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
     ni.DAQmxTaskControl(task_analog, ni.DAQmx_Val_Task_Commit)
     ni.DAQmxTaskControl(task_record, ni.DAQmx_Val_Task_Commit)
 
+    result = ctypes.c_double()
+    ni.DAQmxGetAIConvRate(task_analog, result)
+    log.debug('AI conversion rate %f', result.value)
+
     if callback is not None:
         cb_ptr = create_everynsamples_callback(callback, epoch_size,
                                                task_analog)
