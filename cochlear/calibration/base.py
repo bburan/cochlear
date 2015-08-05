@@ -6,7 +6,8 @@ log = logging.getLogger(__name__)
 import tables
 import numpy as np
 
-from traits.api import Enum, Float, Int, Property, HasTraits, Instance, Bool
+from traits.api import (Enum, Float, Int, Property, HasTraits, Instance, Bool,
+                        Str)
 from traitsui.api import (VGroup, View, Include, Item, HSplit, Tabbed, ToolBar,
                           Action, ActionGroup, MenuBar, Menu)
 from pyface.api import ImageResource, error
@@ -16,6 +17,7 @@ from chaco.api import ArrayPlotData, Plot
 from experiment import AbstractParadigm, AbstractController, icon_dir
 from experiment.util import get_save_file
 
+from cochlear import nidaqmx as ni
 from cochlear.calibration import standard
 from cochlear import settings
 
@@ -24,7 +26,7 @@ class BaseSignalSettings(AbstractParadigm):
 
     kw = dict(context=True)
 
-    output = Enum(('ao1', 'ao0'), label='Analog output (channel)', **kw)
+    output = Enum(('ao0', 'ao1'), label='Analog output (channel)', **kw)
     amplitude = Float(1, label='Waveform amplitude (Vrms)', **kw)
     output_gain = Float(0, label='Output gain (dB)', **kw)
     fft_averages = Int(4, label='Number of FFTs', **kw)
@@ -73,7 +75,7 @@ class BaseSignalSettings(AbstractParadigm):
     )
 
 
-class RefMicSettingsMixin(HasTraits):
+class ReferenceSettingsMixin(HasTraits):
 
     kw = dict(context=True)
     ref_mic_sens_mv = Float(2.703, label='Ref. mic. sens. (mV/Pa)', **kw)
@@ -87,6 +89,16 @@ class RefMicSettingsMixin(HasTraits):
     mic_settings = VGroup(
         'ref_mic_sens_mv',
         'ref_mic_gain',
+        'exp_mic_gain',
+        'exp_range',
+        label='Microphone settings',
+        show_border=True,
+    )
+
+
+class HRTFSettingsMixin(HasTraits):
+
+    mic_settings = VGroup(
         'exp_mic_gain',
         'exp_range',
         label='Microphone settings',
@@ -150,7 +162,6 @@ class BaseSignalExperiment(HasTraits):
         plot.plot(('frequency', 'exp_mic_psd'), index_scale='log', color='red')
         plot.index_axis.title = 'Frequency (Hz)'
         plot.value_axis.title = 'Power (dB)'
-        #plot.value_mapper.range.low_setting = -100
         return plot
 
     def _speaker_spl_plot_default(self):
@@ -160,7 +171,6 @@ class BaseSignalExperiment(HasTraits):
                   color='black')
         plot.index_axis.title = 'Frequency (Hz)'
         plot.value_axis.title = 'Power (dB SPL)'
-        #plot.value_mapper.range.low_setting = 40
         return plot
 
     def _sig_psd_plot_default(self):
@@ -190,6 +200,16 @@ class BaseSignalExperiment(HasTraits):
         label='Mic response',
     )
 
+    signal_plots = VGroup(
+        Item('sig_waveform_plot', editor=ComponentEditor(),
+                width=500, height=200, show_label=False),
+        Item('sig_psd_plot', editor=ComponentEditor(),
+                width=500, height=200, show_label=False),
+        Item('speaker_spl_plot', editor=ComponentEditor(),
+                width=500, height=200, show_label=False),
+        label='Signal',
+    )
+
     traits_view = View(
         HSplit(
             Item('paradigm', style='custom', width=200,
@@ -198,15 +218,7 @@ class BaseSignalExperiment(HasTraits):
                 Item('handler.epochs_acquired', style='readonly'),
                 Tabbed(
                     Include('response_plots'),
-                    VGroup(
-                        Item('sig_waveform_plot', editor=ComponentEditor(),
-                             width=500, height=200, show_label=False),
-                        Item('sig_psd_plot', editor=ComponentEditor(),
-                             width=500, height=200, show_label=False),
-                        Item('speaker_spl_plot', editor=ComponentEditor(),
-                             width=500, height=200, show_label=False),
-                        label='Signal',
-                    )
+                    Include('signal_plots'),
                 ),
             ),
             show_labels=False,
@@ -296,6 +308,34 @@ class BaseSignalController(AbstractController):
         if filename is not None:
             save_results(filename, self.results, self.result_settings)
         self.complete = False
+
+
+class ReferenceControllerMixin(HasTraits):
+
+    MIC_INPUT = '{}, {}'.format(ni.DAQmxDefaults.MIC_INPUT,
+                                ni.DAQmxDefaults.REF_MIC_INPUT)
+
+
+class HRTFControllerMixin(HasTraits):
+
+    MIC_INPUT = ni.DAQmxDefaults.MIC_INPUT
+    calibration = Instance('neurogen.calibration.Calibration')
+    filename = Str()
+
+    def save(self, info=None):
+        save_results(self.filename, self.results, self.result_settings)
+        self.complete = False
+
+
+class HRTFExperimentMixin(HasTraits):
+
+    response_plots = VGroup(
+        Item('mic_waveform_plot', editor=ComponentEditor(), width=500,
+             height=200, show_label=False),
+        Item('mic_psd_plot', editor=ComponentEditor(), width=500, height=200,
+             show_label=False),
+        label='Mic response',
+    )
 
 
 def save_results(filename, results, settings):

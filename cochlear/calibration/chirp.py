@@ -1,6 +1,5 @@
-from traits.api import Float, Property, Instance, Str
+from traits.api import Float, Property
 from traitsui.api import VGroup, Item
-from enable.api import ComponentEditor
 
 from neurogen.util import db, dbi
 
@@ -9,9 +8,12 @@ from cochlear import settings
 from cochlear.calibration import ChirpCalibration
 from cochlear.calibration.base import (BaseSignalSettings,
                                        BaseSignalController,
-                                       RefMicSettingsMixin,
                                        BaseSignalExperiment,
-                                       save_results)
+                                       HRTFControllerMixin,
+                                       HRTFSettingsMixin,
+                                       HRTFExperimentMixin,
+                                       ReferenceControllerMixin,
+                                       ReferenceSettingsMixin)
 
 
 ################################################################################
@@ -88,14 +90,12 @@ class BaseChirpController(BaseSignalController):
 ################################################################################
 # Reference microphone calibration
 ################################################################################
-class ReferenceCalibrationSettings(RefMicSettingsMixin, BaseChirpSettings):
+class ReferenceCalibrationSettings(ReferenceSettingsMixin, BaseChirpSettings):
     pass
 
 
-class ReferenceCalibrationController(BaseChirpController):
-
-    MIC_INPUT = '{}, {}'.format(ni.DAQmxDefaults.MIC_INPUT,
-                                ni.DAQmxDefaults.REF_MIC_INPUT)
+class ReferenceCalibrationController(ReferenceControllerMixin,
+                                     BaseChirpController):
 
     def finalize(self):
         ref_mic_sens = self.get_current_value('ref_mic_sens')
@@ -138,25 +138,14 @@ def reference_calibration(**kwargs):
 ################################################################################
 # Ear transfer function
 ################################################################################
-class HRTFSettings(BaseChirpSettings):
+class HRTFSettings(HRTFSettingsMixin, BaseChirpSettings):
 
-    mic_settings = VGroup(
-        'exp_mic_gain',
-        'exp_range',
-        label='Microphone settings',
-        show_border=True,
-    )
+    exp_mic_gain = 40
+    output_gain = -20
+    freq_lb = 500
 
 
-class HRTFController(BaseChirpController):
-
-    MIC_INPUT = ni.DAQmxDefaults.MIC_INPUT
-    calibration = Instance('neurogen.calibration.Calibration')
-    filename = Str()
-
-    def save(self, info=None):
-        save_results(self.filename, self.results, self.result_settings)
-        self.complete = False
+class HRTFController(HRTFControllerMixin, BaseChirpController):
 
     def finalize(self):
         exp_mic_gain = dbi(self.get_current_value('exp_mic_gain'))
@@ -182,15 +171,8 @@ class HRTFController(BaseChirpController):
         self.complete = True
 
 
-class HRTF(BaseSignalExperiment):
-
-    response_plots = VGroup(
-        Item('mic_waveform_plot', editor=ComponentEditor(), width=500,
-             height=200, show_label=False),
-        Item('mic_psd_plot', editor=ComponentEditor(), width=500, height=200,
-             show_label=False),
-        label='Mic response',
-    )
+class HRTF(HRTFExperimentMixin, BaseSignalExperiment):
+    pass
 
 
 def hrtf_calibration(calibration, filename, **kwargs):
@@ -201,9 +183,9 @@ def hrtf_calibration(calibration, filename, **kwargs):
 
 if __name__ == '__main__':
     reference_calibration()
-    import os.path
-    from neurogen.calibration import InterpCalibration
-    mic_file = os.path.join('c:/data/cochlear/calibration',
-                            '150407 - calibration with 377C10.mic')
-    c = InterpCalibration.from_mic_file(mic_file)
-    hrtf_calibration(c, 'temp.hdf5')
+    #import os.path
+    #from neurogen.calibration import InterpCalibration
+    #mic_file = os.path.join('c:/data/cochlear/calibration',
+    #                        '150730 - Golay calibration with 377C10.mic')
+    #c = InterpCalibration.from_mic_file(mic_file)
+    #hrtf_calibration(c, 'temp.hdf5')
