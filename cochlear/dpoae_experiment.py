@@ -91,9 +91,8 @@ class DPOAEParadigm(AbstractParadigm):
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
     f2_frequency = Expression(
-        'u(dp(500, 22.6e3, 0.5, 1/response_window), f2_level)',
+        'u(dp(2e3, 22.6e3, 0.5, 1/response_window), f2_level)',
         label='f2 frequency (Hz)', **kw)
-    #f2_frequency = Expression(11310, label='f2 frequency (Hz)', **kw)
 
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
     f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',

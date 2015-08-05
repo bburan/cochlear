@@ -62,7 +62,7 @@ class ABRParadigm(AbstractParadigm):
     kw = dict(context=True, log=True)
 
     # Signal acquisition settings
-    averages = Expression(1024, dtype=np.int, **kw)
+    averages = Expression(512, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
     reject_threshold = Expression(0.2, dtype=np.float, **kw)
     exp_mic_gain = Expression(40, dtype=np.float, **kw)
@@ -71,7 +71,7 @@ class ABRParadigm(AbstractParadigm):
     repetition_rate = Expression(20, dtype=np.float, **kw)
     repetition_jitter = Expression(0, dtype=np.float, **kw)
 
-    frequencies = [4000, 5660, 8000, 11310, 16000, 22630]
+    frequencies = [2000, 2820, 4000, 5660, 8000, 11310, 16000, 22630]
     frequency = Expression('u(exact_order({}, c=1), level)'.format(frequencies),
                            dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
