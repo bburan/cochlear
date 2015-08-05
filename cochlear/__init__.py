@@ -21,10 +21,11 @@ def configure_logging(filename=None):
             },
         'loggers': {
             '__main__': {'level': 'DEBUG'},
-            'neurogen.calibration': {'level': 'DEBUG'},
+            'neurogen.calibration': {'level': 'ERROR'},
             'experiment': {'level': 'ERROR'},
+            'experiment.coroutine': {'level': 'ERROR'},
             'cochlear': {'level': 'ERROR'},
-            'cochlear.nidaqmx': {'level': 'DEBUG'},
+            'cochlear.nidaqmx': {'level': 'ERROR'},
             },
         'root': {
             'handlers': ['console'],

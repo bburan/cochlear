@@ -57,8 +57,8 @@ def dpoae_analyze(waveforms, fs, frequencies, mic_cal, window=None):
 @coroutine
 def dpoae_reject(fs, dpoae, mic_cal, noise_floor, target):
     '''
-    Accept data if DPOAE amplitude is greater than the noise floor or the noise
-    floor is less than the specified value.
+    Accept data if DPOAE amplitude is 6dB greater than the noise floor or the
+    noise floor is less than the specified value.
     '''
     while True:
         raw_data = (yield)
@@ -66,7 +66,7 @@ def dpoae_reject(fs, dpoae, mic_cal, noise_floor, target):
         nf_rms, dp_rms = tone_power_conv_nf(data, fs, dpoae)
         nf_spl, dp_spl = mic_cal.get_spl(dpoae, [nf_rms, dp_rms])
         log.debug('DPOAE reject: DPOAE %.2f, noise floor %.2f', dp_spl, nf_spl)
-        if (nf_spl < noise_floor) or (nf_spl < dp_spl):
+        if (nf_spl < noise_floor) or (nf_spl < (dp_spl-6)):
             target.send(raw_data)
 
 
@@ -174,7 +174,6 @@ class DPOAEController(AbstractController):
         ('measured_dpoae_nf', np.float32),
         ('primary_sens', np.float32),
         ('secondary_sens', np.float32),
-        #('total_repetitions', np.float32),
     ]
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
@@ -266,7 +265,7 @@ class DPOAEController(AbstractController):
         )
 
         self.iface_adc = ni.ContinuousDAQmxSource(
-            input_line=self.mic_input_line,
+            analog_input=self.mic_input_line,
             fs=self.adc_fs,
             pipeline=pipeline,
             complete_callback=self.trial_complete,

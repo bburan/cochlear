@@ -9,6 +9,75 @@ import time
 
 import ctypes
 
+class TestCoroutine(unittest.TestCase):
+
+    class Accumulator(object):
+
+        def __init__(self):
+            self.results = []
+
+        def send(self, data):
+            self.results.append(data)
+
+    def setUp(self):
+        self.epoch_size = 10
+        self.target = self.Accumulator()
+        self.coroutine = ni.triggered_ai_from_continuous(self.epoch_size,
+                                                         self.target)
+
+    def test_coroutine(self):
+        # First send
+        indices = 5, 23, 40, 55
+        analog = np.arange(200)
+        digital = np.zeros_like(analog)
+        expected = []
+        for i in indices:
+            digital[i] = 1
+            expected.append(analog[i:i+self.epoch_size])
+        self.coroutine.send((digital, analog))
+        np.testing.assert_array_equal(self.target.results, expected)
+
+        # Second send
+        indices = 0, 11, 22, 50
+        analog = np.random.random(200)
+        digital = np.zeros_like(analog)
+        for i in indices:
+            digital[i] = 1
+            expected.append(analog[i:i+self.epoch_size])
+        self.coroutine.send((digital, analog))
+        np.testing.assert_array_equal(self.target.results, expected)
+
+        # Third send
+        analog = np.random.random(10)
+        digital = np.zeros_like(analog)
+        digital[0] = 1
+        expected.append(analog[:self.epoch_size])
+        self.coroutine.send((digital, analog))
+        np.testing.assert_array_equal(self.target.results, expected)
+
+        # Third send
+        analog = np.random.random(10)
+        digital = np.zeros_like(analog)
+        digital[0] = 1
+        expected.append(analog[:self.epoch_size])
+        self.coroutine.send((digital, analog))
+        np.testing.assert_array_equal(self.target.results, expected)
+        print len(self.target.results)
+        print len(expected)
+
+        # Fourth send
+        analog = np.random.random(50)
+        digital = np.zeros_like(analog)
+        digital = np.zeros_like(analog)
+        indices = 11, 22, 45, 49
+        for i in indices:
+            digital[i] = 1
+            if i < 40:
+                expected.append(analog[i:i+self.epoch_size])
+        self.coroutine.send((digital, analog))
+        np.testing.assert_array_equal(self.target.results, expected)
+
+
 class TestDAQmxConfig(unittest.TestCase):
 
     def setUp(self):
@@ -96,11 +165,11 @@ class TestDAQmxAttenControl(unittest.TestCase):
                                                        0, 0, 0, 0, 0, 0, 0, 1]),
         ]
         for args, expected in test_values:
-            actual = get_bits(*args)
+            actual = ni.get_bits(*args)
             self.assertEqual(actual, expected)
 
     def test_gain_to_bits(self):
-        atten = DAQmxAttenControl()
+        atten = ni.DAQmxAttenControl()
         self.assertEqual(atten._gain_to_byte(31.5), 255)
         self.assertEqual(atten._gain_to_byte(-95.5), 1)
 

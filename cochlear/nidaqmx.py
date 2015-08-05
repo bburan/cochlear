@@ -20,6 +20,8 @@ from neurogen.player import ContinuousPlayer, QueuedPlayer
 from neurogen.blocks import ScalarInput
 from neurogen import prepare_for_write
 
+from experiment.coroutine import coroutine
+
 import threading
 
 import logging
@@ -46,7 +48,8 @@ class DAQmxDefaults(object):
     DUAL_MIC_INPUT = ','.join((MIC_INPUT, REF_MIC_INPUT))
 
     AI_COUNTER = '/{}/Ctr0'.format(DEV)
-    AI_TRIGGER = '/{}/PFI0'.format(DEV)
+    AI_TRIGGER = '/{}/PFI0'.format(DEV)  # triggered acq.
+    AI_TRIGGER_DI = '/{}/port0/line7'.format(DEV)  # pseudo-triggered acq.
     AI_RUN = None
     AI_RANGE = 10
 
@@ -54,7 +57,7 @@ class DAQmxDefaults(object):
     # hardware-timed DIO.
     AO_TRIGGER = '/{}/port0/line0'.format(DEV)
     # Digital output used to indicate that a stimulus is being played out (will
-    # be high for full sequence of trials). Must support hardware-timed DIO.
+    # be high for fullsequence of trials). Must support hardware-timed DIO.
     AO_RUN = '/{}/port0/line1'.format(DEV)
 
     AO_RANGE = np.sqrt(2)
@@ -90,6 +93,49 @@ def get_bits(word, n, order='big-endian'):
         return bitword
     else:
         raise ValueError('Byte order {} not recognized'.format(order))
+
+
+def ts(TTL):
+    return np.flatnonzero(TTL)
+
+
+def edge_rising(TTL):
+    return np.r_[0, np.diff(TTL.astype('i'))] == 1
+
+
+def edge_falling(TTL):
+    return np.r_[0, np.diff(TTL.astype('i'))] == -1
+
+
+@coroutine
+def triggered_ai_from_continuous(epoch_size, target):
+    '''
+    Coroutine to allow us to extract triggered epochs from a continuous analog
+    input
+    '''
+    # This is important as it allows us to properly handle digital data that's
+    # high on the very first sample.
+    digital = np.array([0], dtype=np.int32)
+    analog = None
+    while True:
+        d, a = (yield)
+        digital = np.concatenate((digital, d.astype(np.int32)), axis=-1)
+        if analog is not None:
+            analog = np.concatenate((analog, a), axis=-1)
+        else:
+            analog = a
+        timestamps = np.flatnonzero(np.diff(digital) == 1)
+        last_timestamp = 0
+        epochs = []
+        for t in timestamps:
+            if (t+epoch_size) <= analog.shape[-1]:
+                epochs.append(analog[..., t:t+epoch_size][np.newaxis])
+                last_timestamp = t
+        if len(epochs) != 0:
+            epochs = np.concatenate(epochs, axis=0)
+            target.send(epochs)
+            analog = analog[..., last_timestamp+epoch_size:]
+            digital = digital[last_timestamp+epoch_size:]
 
 
 ################################################################################
@@ -149,9 +195,10 @@ def create_event_timer(trigger, fs, counter='/Dev1/Ctr0',
     return task
 
 
-def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None,
-                         callback_samples=None, delay_samples=0,
-                         posttrigger_samples=2, task=None):
+def create_continuous_ai(ai, fs, run_line=None, expected_range=10,
+                         record_mode=ni.DAQmx_Val_Diff, callback=None,
+                         callback_samples=1000, delay_samples=0,
+                         posttrigger_samples=2, task=None, di=None):
     '''
     Parameters
     ----------
@@ -169,8 +216,8 @@ def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None
     if task is None:
         task = create_task()
     vlb, vub = -expected_range, expected_range
-    ni.DAQmxCreateAIVoltageChan(task, ai, '', ni.DAQmx_Val_Diff, vlb,
-                                vub, ni.DAQmx_Val_Volts, '')
+    ni.DAQmxCreateAIVoltageChan(task, ai, '', record_mode, vlb, vub,
+                                ni.DAQmx_Val_Volts, '')
 
     # Set up acquisition start/end trigger.  The acquisition will continue after
     # the stop trigger by the specified number of posttrigger samples.  We need
@@ -206,6 +253,14 @@ def create_continuous_ai(ai, fs, run_line=None, expected_range=10, callback=None
     else:
         cb_ptr = None
     return task, cb_ptr
+
+
+def create_continuous_di(di, fs, run_line=None, sample_clock='ai/SampleClock'):
+    task = create_task()
+    ni.DAQmxCreateDIChan(task, di, '', ni.DAQmx_Val_ChanPerLine)
+    ni.DAQmxCfgSampClkTiming(task, sample_clock, fs, ni.DAQmx_Val_Rising,
+                             ni.DAQmx_Val_ContSamps, 1000)
+    return task
 
 
 def create_retriggerable_ai(ai, fs, epoch_size, trigger, expected_range=10,
@@ -569,7 +624,8 @@ class DAQmxSource(DAQmxBase):
             if self.pipeline is not None:
                 self.pipeline.send(waveforms)
                 log.debug('Sent to provided pipeline')
-        except GeneratorExit:
+        except GeneratorExit as e:
+            log.exception(e)
             log.debug('Captured generator exit event')
             self._event.set()
             self.stop()
@@ -589,9 +645,10 @@ class DAQmxSource(DAQmxBase):
 
 class ContinuousDAQmxSource(DAQmxSource):
 
-    def __init__(self, fs=25e3, input_line='/Dev1/ai0', callback=None,
-                 callback_samples=None, expected_range=10, run_line=None,
-                 delay_samples=0, pipeline=None, complete_callback=None):
+    def __init__(self, fs=25e3, analog_input='/Dev1/ai0', digital_input=None,
+                 callback=None, callback_samples=1000, expected_range=10,
+                 run_line=None, delay_samples=0, pipeline=None,
+                 complete_callback=None, record_mode=DAQmxSource.DIFF):
         '''
         Parameters
         ----------
@@ -612,15 +669,21 @@ class ContinuousDAQmxSource(DAQmxSource):
     def setup(self):
         log.debug('Setting up continuous AI tasks')
         self._task_analog, self._cb_ptr = create_continuous_ai(
-            ai=self.input_line,
+            ai=self.analog_input,
             fs=self.fs,
             run_line=self.run_line,
             expected_range=self.expected_range,
             callback=self.trigger_callback,
             callback_samples=self.callback_samples,
             delay_samples=self.delay_samples,
+            record_mode=self.record_mode,
         )
         self._tasks.append(self._task_analog)
+        if self.digital_input is not None:
+            self._task_digital = create_continuous_di(di=self.digital_input,
+                                                      fs=self.fs)
+            self._tasks.append(self._task_digital)
+
         self.channels = num_channels(self._task_analog)
         log.debug('Configured continous AI with %d channels controlled by %s',
                   self.channels, self.run_line)
@@ -628,6 +691,30 @@ class ContinuousDAQmxSource(DAQmxSource):
 
     def samples_available(self):
         return samples_available(self._task_analog)
+
+    def read_analog(self, timeout=None):
+        if timeout is None:
+            timeout = 0
+        samps_per_chan = self.samples_available()
+        result = ctypes.c_long()
+        analog_data = np.empty((self.channels, samps_per_chan), dtype=np.double)
+        ni.DAQmxReadAnalogF64(self._task_analog, samps_per_chan, timeout,
+                              ni.DAQmx_Val_GroupByChannel, analog_data,
+                              analog_data.size, result, None)
+        log.debug('Read %d s/chan from %s', result.value, self.analog_input)
+        analog_data.shape = self.channels, -1
+        if self.digital_input is not None:
+            digital_data = np.empty(samps_per_chan, dtype=np.uint8)
+            bytes_per_samp = ctypes.c_long()
+            ni.DAQmxReadDigitalLines(self._task_digital, samps_per_chan,
+                                     timeout, ni.DAQmx_Val_GroupByChannel,
+                                     digital_data, digital_data.size, result,
+                                     bytes_per_samp, None)
+            log.debug('Read %d s/chan from %s at %d bytes/s', result.value,
+                      self.digital_input, bytes_per_samp.value)
+            return digital_data, analog_data
+        else:
+            return analog_data
 
 
 class TriggeredDAQmxSource(DAQmxSource):
