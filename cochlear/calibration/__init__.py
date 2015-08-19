@@ -64,12 +64,11 @@ def _check_calibration(frequency, rms, nf_rms, min_db, thd, max_thd):
 def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
                min_db=10, duration=0.1, trim=0.01,
                output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
-               input_line=ni.DAQmxDefaults.MIC_INPUT):
+               input_line=ni.DAQmxDefaults.MIC_INPUT, debug=False):
 
     calibration = InterpCalibration.as_attenuation(vrms=vrms)
     c = ni.DAQmxChannel(calibration=calibration)
     trim_n = int(trim*fs)
-
     daq_kw = {
         'channels': [c],
         'repetitions': repetitions,
@@ -94,7 +93,11 @@ def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
     else:
         nf_signal = np.full_like(signal, np.nan)
 
-    return _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd)
+    result = _process_tone(frequency, fs, nf_signal, signal, min_db, max_thd)
+    if debug:
+        return result, signal, nf_signal
+    else:
+        return result
 
 
 def tone_spl(frequency, input_calibration, *args, **kwargs):
