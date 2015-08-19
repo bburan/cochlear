@@ -4,7 +4,7 @@ log = logging.getLogger(__name__)
 import time
 
 from traits.api import (Instance, Float, Int, push_exception_handler, Bool,
-                        HasTraits, Str, List, Enum)
+                        HasTraits, Str, List, Enum, Property)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include,
                           ListEditor)
@@ -71,13 +71,15 @@ class ABRParadigm(AbstractParadigm):
     repetition_rate = Expression(20, dtype=np.float, **kw)
     repetition_jitter = Expression(0, dtype=np.float, **kw)
 
-    frequencies = [2000, 2820, 4000, 5660, 8000, 11310, 16000, 22630]
+    #frequencies = [700, 1000, 1420, 2000, 2820, 4000, 5660, 8000]
+    #frequencies = [700, 1420, 2820, 5660]
+    frequencies = [1420, 4000]
     frequency = Expression('u(exact_order({}, c=1), level)'.format(frequencies),
                            dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
     level = Expression(
-        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90], c=1)',
+        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80], c=1)',
         dtype=np.float, **kw)
 
     traits_view = View(
@@ -123,13 +125,13 @@ class ABRController(AbstractController):
     kw = dict(log=True, dtype=np.float32)
     primary_spl = Float(label='Primary @ 1Vrms, 0dB att (dB SPL)', **kw)
     primary_attenuation = Float(label='Primary attenuation (dB)', **kw)
-    primary_calibration_gain = Float(label='Primary cal. gain (dB)', **kw)
     start_time = Float(label='Start time', **kw)
     end_time = Float(label='End time', **kw)
 
     current_valid_repetitions = Int(0, log=True, dtype=np.int32)
     current_repetitions = Int(0, log=True, dtype=np.int32)
     current_rejects = Int(0, log=True, dtype=np.int32)
+    current_calibration_gain = Property(log=True, dtype=np.float32)
 
     adc_fs = Float(ADC_FS, **kw)
     dac_fs = Float(DAC_FS, **kw)
@@ -141,12 +143,16 @@ class ABRController(AbstractController):
         ('primary_sens', np.float32),
     ]
 
+    def _get_current_calibration_gain(self):
+        frequency = self.get_current_value('frequency')
+        return -20 if frequency <= 700 else -40
+
     @depends_on('exp_mic_gain')
     def set_frequency(self, frequency):
         log.debug('Calibrating primary speaker')
         self.primary_sens = calibration.tone_calibration(
-            frequency, self.mic_cal, gain=-40, max_thd=None,
-            output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
+            frequency, self.mic_cal, gain=self.current_calibration_gain,
+            max_thd=None, output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)
         self.frequency_changed = True
 
@@ -279,14 +285,11 @@ class ABRController(AbstractController):
                        primary_spl=self.primary_spl,
                        fs=self.adc_fs,
                        primary_attenuation=self.primary_attenuation,
-                       primary_calibration_gain=self.primary_calibration_gain,
+                       primary_calibration_gain=self.current_calibration_gain,
                        total_repetitions=self.current_repetitions,
                        start_time=self.start_time,
                        end_time=self.end_time,
                        )
-
-    def primary_calibration_gain_callback(self, value):
-        self.primary_calibration_gain = value
 
 
 class _ABRPlot(HasTraits):
@@ -345,8 +348,6 @@ class ABRExperiment(AbstractExperiment):
                     Include('context_group'),
                 ),
                 VGroup(
-                    Item('handler.primary_calibration_gain',
-                            style='readonly', format_str='%d'),
                     Item('handler.primary_spl', style='readonly',
                          format_str='%0.2f'),
                     Item('handler.primary_attenuation', style='readonly',

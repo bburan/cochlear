@@ -4,7 +4,7 @@ log = logging.getLogger(__name__)
 import time
 
 from traits.api import (Instance, Float, push_exception_handler, Bool, Int,
-                        List, HasTraits, Str)
+                        List, HasTraits, Str, Property)
 from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
                           HSplit, MenuBar, Menu, Tabbed, HGroup, Include,
                           ListEditor)
@@ -91,7 +91,7 @@ class DPOAEParadigm(AbstractParadigm):
     f1_frequency = Expression('imul(f2_frequency/1.2, 1/response_window)',
                               label='f1 frequency (Hz)', **kw)
     f2_frequency = Expression(
-        'u(dp(2e3, 22.6e3, 0.5, 1/response_window), f2_level)',
+        'u(dp(0.7e3, 16e3, 0.5, 1/response_window), f2_level)',
         label='f2 frequency (Hz)', **kw)
 
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
@@ -179,6 +179,16 @@ class DPOAEController(AbstractController):
 
     mic_input_line = ni.DAQmxDefaults.MIC_INPUT
 
+    primary_calibration_gain = Property(log=True, dtype=np.float32)
+    secondary_calibration_gain = Property(log=True, dtype=np.float32)
+
+    def _get_primary_calibration_gain(self):
+        frequency = self.get_current_value('f2_frequency')
+        return -20 if frequency <= 700 else -40
+
+    def _get_secondary_calibration_gain(self):
+        frequency = self.get_current_value('f1_frequency')
+        return -20 if frequency <= 700 else -40
 
     def next_trial(self, info=None):
         try:
@@ -356,6 +366,8 @@ class DPOAEController(AbstractController):
             secondary_sens=secondary_sens,
             primary_spl=self.primary_spl,
             secondary_spl=self.secondary_spl,
+            primary_calibration_gain=self.primary_calibration_gain,
+            secondary_calibration_gain=self.secondary_calibration_gain,
             #primary_attenuation=self.primary_attenuation,
             #secondary_attenuation=self.secondary_attenuation,
             total_repetitions=self.current_repetitions,
@@ -381,7 +393,9 @@ class DPOAEController(AbstractController):
     def calibrate_speakers(self, f1_frequency, f2_frequency):
         log.debug('Calibrating speakers')
         f1_sens, f2_sens = calibration.two_tone_calibration(
-            f1_frequency, f2_frequency, self.mic_cal, f1_gain=-40, f2_gain=-40,
+            f1_frequency, f2_frequency, self.mic_cal,
+            f1_gain=self.primary_calibration_gain,
+            f2_gain=self.secondary_calibration_gain,
             max_thd=None)
         self.primary_sens = f1_sens
         self.secondary_sens = f2_sens
