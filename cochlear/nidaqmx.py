@@ -11,6 +11,7 @@ from __future__ import division
 import ctypes
 import unittest
 import time
+import importlib
 
 import PyDAQmx as ni
 import numpy as np
@@ -69,12 +70,17 @@ class DAQmxDefaults(object):
     AI_FS = 200e3
     AO_FS = 200e3
 
-    # Will be software-timed DIO
-    VOLUME_CLK = '/{}/port1/line2'.format(DEV)
-    VOLUME_CS = '/{}/port1/line3'.format(DEV)
-    VOLUME_SDI = '/{}/port1/line4'.format(DEV)
-    VOLUME_MUTE = '/{}/port1/line5'.format(DEV)
-    VOLUME_ZC = '/{}/port1/line6'.format(DEV)
+    # Default attenuator will be the PGA2310. This can be overridden on a
+    # case-by-case basis.
+    #ATTEN_CLASS = 'cochlear.nidaqmx.DAQmxPGA2310Atten'
+    #ATTEN_KW = {
+    #    'clk_line': '/{}/port1/line2'.format(DEV),
+    #    'cs_line': '/{}/port1/line3'.format(DEV),
+    #    'sdi_line': '/{}/port1/line4'.format(DEV),
+    #    'mute_line': '/{}/port1/line5'.format(DEV),
+    #    'zc_line': '/{}/port1/line6'.format(DEV),
+    #}
+    ATTEN_CLASS = 'cochlear.nidaqmx.DAQmxNullAtten'
 
     TRIGGER_DURATION = 1e-3
 
@@ -893,18 +899,74 @@ class DAQmxOutput(DAQmxBase):
         super(DAQmxPlayer, self).__init__(**kwargs)
 
 
-class DAQmxAttenControl(DAQmxBase):
+
+################################################################################
+# Attenuation support
+################################################################################
+class DAQmxBaseAtten(DAQmxBase):
+
+    def set_gains(self, gain):
+        '''
+        Utility function for setting gain of right and left to same value
+        '''
+        self.set_gain(gain, gain)
+
+    def set_atten(self, right=None, left=None):
+        '''
+        Set the IC volume control to the desired attenuation.
+
+        This is a convenience method that allows one to specify the volume as an
+        attenuation rather than a gain as it passes the inverted values to
+        `set_gain`.
+
+        .. note::
+            Be sure to set attenuation to np.inf if you want to mute the
+            channel instead of -np.inf.
+        '''
+        if right is not None:
+            right = -right
+        if left is not None:
+            left = -left
+        self.set_gain(right, left)
+
+    def set_attens(self, attens):
+        '''
+        Utility function for setting atten of right and left to same value
+
+        This is a convenience method that allows one to specify the volume as an
+        attenuation rather than a gain as it passes the inverted values to
+        `set_gains`.
+        '''
+        self.set_gains([-a for a in attens])
+
+
+class DAQmxNullAtten(DAQmxBaseAtten):
+
+    def setup(self, gain=None):
+        if gain:
+            raise ValueError('Cannot set gain')
+
+    def set_gain(self, right=None, left=None):
+        if right:
+            raise ValueError('Cannot set gain')
+        if left:
+            raise ValueError('Cannot set gain')
+
+    def set_mute(self, mute):
+        if mute:
+            raise ValueError('Cannot mute output')
+
+
+class DAQmxPGA2310Atten(DAQmxBaseAtten):
     '''
     Handles configuration and control of niDAQmx for controlling volume via
     serial control of a programmable IC chip
     '''
-    # Gain control settings in dB.  This is IC specific.  Maximum volume is
-    # +31.5 dB.
+    # Gain control settings in dB.  This is IC specific.  Maximum gain is
+    # 31.5 dB and max atten is 96 dB.
     VOLUME_STEP = 0.5
     VOLUME_MAX = 31.5
-    #VOLUME_MIN = -96
     VOLUME_MIN = -50
-    #VOLUME_MAX = 0
     VOLUME_BITS = 16
 
     MAX_ATTEN = -VOLUME_MIN
@@ -913,13 +975,7 @@ class DAQmxAttenControl(DAQmxBase):
 
     fs = 200e3
 
-    def __init__(self,
-                 clk_line=DAQmxDefaults.VOLUME_CLK,
-                 cs_line=DAQmxDefaults.VOLUME_CS,
-                 sdi_line=DAQmxDefaults.VOLUME_SDI,
-                 mute_line=DAQmxDefaults.VOLUME_MUTE,
-                 zc_line=DAQmxDefaults.VOLUME_ZC,
-                 ):
+    def __init__(self, clk_line, cs_line, sdi_line, mute_line, zc_line):
         '''
         Parameters
         ----------
@@ -943,7 +999,7 @@ class DAQmxAttenControl(DAQmxBase):
             setattr(self, k, v)
         self._right_setting = None
         self._left_setting = None
-        super(DAQmxAttenControl, self).__init__()
+        super(DAQmxPGA2310Atten, self).__init__()
 
     def setup(self, gain=-np.inf):
         # Configure the tasks and IO lines
@@ -974,10 +1030,10 @@ class DAQmxAttenControl(DAQmxBase):
             self.set_gains(gain)
         else:
             self.set_gain(*gain)
-        super(DAQmxAttenControl, self).setup()
+        super(DAQmxPGA2310Atten, self).setup()
 
     def start(self):
-        super(DAQmxAttenControl, self).start()
+        super(DAQmxPGA2310Atten, self).start()
         self._send_bit(self._task_cs, 1)
         self.set_mute(False)
         self.set_zero_crossing(False)
@@ -987,7 +1043,7 @@ class DAQmxAttenControl(DAQmxBase):
         for task in (self._task_zc, self._task_mute, self._task_clk,
                      self._task_cs, self._task_sdi):
             ni.DAQmxClearTask(task)
-        super(DAQmxAttenControl, self).clear()
+        super(DAQmxPGA2310Atten, self).clear()
 
     def _gain_to_byte(self, gain):
         '''
@@ -1169,6 +1225,22 @@ class DAQmxAttenControl(DAQmxBase):
         return np.clip(hw_atten, self.MIN_ATTEN, self.MAX_ATTEN)
 
 
+def class_for_name(full_name):
+    module_name, class_name = full_name.rsplit('.', 1)
+    # load the module, will raise ImportError if module cannot be loaded
+    m = importlib.import_module(module_name)
+    # get the class, will raise AttributeError if class cannot be found
+    c = getattr(m, class_name)
+    return c
+
+
+def get_default_attenuator(**kwargs):
+    c = class_for_name(DAQmxDefaults.ATTEN_CLASS)
+    class_kw = getattr(DAQmxDefaults, 'ATTEN_KW', {})
+    class_kw.update(kwargs)
+    return c(**class_kw)
+
+
 ################################################################################
 # Primary helpers for DAQ
 ################################################################################
@@ -1229,7 +1301,7 @@ class DAQmxAcquire(BaseDAQmxAcquire):
                                               callback=self.poll)
         self.iface_adc.start()
 
-        self.iface_atten = DAQmxAttenControl()
+        self.iface_atten = get_default_attenuator()
         self.iface_atten.setup()
         if np.isscalar(gain):
             self.iface_atten.set_gains(gain)
@@ -1286,7 +1358,7 @@ class DAQmxAcquireWaveform(BaseDAQmxAcquire):
                                               input_line=input_line,
                                               expected_range=input_range,
                                               callback=self.poll)
-        self.iface_atten = DAQmxAttenControl()
+        self.iface_atten = get_default_attenuator()
         self.iface_atten.setup(gain)
         self.iface_dac = DAQmxPlayer(fs=dac_fs, total_duration=total_duration,
                                      output_line=output_line, allow_regen=True)
