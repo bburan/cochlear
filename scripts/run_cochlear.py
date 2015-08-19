@@ -86,7 +86,6 @@ class ExperimentSetup(HasTraits):
     experimenter = Str
     experiment_note = Str
 
-    animals = Property(List)
     animal = Str
     ear = Enum(('right', 'left'))
 
@@ -122,9 +121,6 @@ class ExperimentSetup(HasTraits):
     def _get_experimenters(self):
         return ['Brad', 'Stephen']
 
-    def _get_animals(self):
-        return ['Beowulf', 'Oghul']
-
     def _calibration_changed(self, new):
         filename = os.path.join(settings.CALIBRATION_DIR, new)
         self.mic_cal = InterpCalibration.from_mic_file(filename)
@@ -133,7 +129,7 @@ class ExperimentSetup(HasTraits):
         VGroup(
             Item('experimenter', editor=EnumEditor(name='experimenters')),
             HGroup(
-                Item('animal', editor=EnumEditor(name='animals')),
+                Item('animal'),
                 Item('ear'),
             ),
             Item('experiment_note'),
@@ -149,9 +145,6 @@ class ExperimentSetup(HasTraits):
             Action(name='Chirp HRTF',
                    image=ImageResource('media_record', icon_dir),
                    action='run_chirp_hrtf_calibration'),
-            Action(name='Golay HRTF',
-                   image=ImageResource('media_record', icon_dir),
-                   action='run_golay_hrtf_calibration'),
             Action(name='ABR',
                    image=ImageResource('view_statistics', icon_dir),
                    enabled_when='mic_cal is not None '
