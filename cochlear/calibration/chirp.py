@@ -141,7 +141,7 @@ def reference_calibration(**kwargs):
 class HRTFSettings(HRTFSettingsMixin, BaseChirpSettings):
 
     exp_mic_gain = 40
-    output_gain = -20
+    output_gain = -40
     freq_lb = 500
 
 
