@@ -798,7 +798,7 @@ class DAQmxPlayer(DAQmxBase):
                   self.samples_written, result.value, write_size)
         return write_size
 
-    def simple_write(self, analog, iti,
+    def simple_write(self, analog, iti=0,
                      trigger_duration=DAQmxDefaults.TRIGGER_DURATION):
         analog, trigger, running = prepare_for_write(analog, self.fs, iti,
                                                      trigger_duration)
@@ -1304,3 +1304,26 @@ def acquire_waveform(*args, **kwargs):
     daq.start()
     daq.join()
     return daq.get_waveforms()
+
+
+################################################################################
+# Debugging functions
+################################################################################
+class TonePlayer(object):
+
+    def __init__(self, fs, frequency,
+                 output_line=DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT):
+        period = frequency**-1
+        period_samples = int(fs*period)
+        t = np.arange(period_samples, dtype=np.float32)/fs
+        waveform = np.cos(2*np.pi*t*frequency)
+        self.iface_dac = DAQmxPlayer(fs=fs, output_line=output_line)
+        self.iface_dac.setup()
+        self.iface_dac.simple_write(waveform)
+
+    def start(self):
+        self.iface_dac.start()
+
+
+def reset(device='Dev1'):
+    ni.DAQmxResetDevice(device)
