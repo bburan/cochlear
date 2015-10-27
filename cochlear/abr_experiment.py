@@ -69,17 +69,22 @@ class ABRParadigm(AbstractParadigm):
 
     # Stimulus settings
     repetition_rate = Expression(20, dtype=np.float, **kw)
+    #repetition_rate = Expression(40, dtype=np.float, **kw)
     repetition_jitter = Expression(0, dtype=np.float, **kw)
 
     #frequencies = [700, 1000, 1420, 2000, 2820, 4000, 5660, 8000]
     #frequencies = [700, 1420, 2820, 5660]
-    frequencies = [1420, 4000]
+    #frequencies = [1420, 4000]
+    frequencies = [1420, 4000, 8000, 700, 2840]
+    #frequencies = [1250, 2500, 5000, 10000, 20000]
     frequency = Expression('u(exact_order({}, c=1), level)'.format(frequencies),
                            dtype=np.float, **kw)
     duration = Expression(5e-3, dtype=np.float, **kw)
     ramp_duration = Expression(0.5e-3, dtype=np.float, **kw)
     level = Expression(
-        'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80], c=1)',
+        #'exact_order([20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80], c=1)',
+        'exact_order([30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80], c=1)',
+        #'exact_order([20, 40, 60, 80], c=1)',
         dtype=np.float, **kw)
 
     traits_view = View(

@@ -55,7 +55,7 @@ class ExperimentController(Controller):
             'repetition_rate': 40,
             'level': 'exact_order([80], c=1)',
             'frequency': '11310',
-            'reject_threshold': 1.0,
+            'reject_threshold': 0.2,
         }
         abr_experiment.launch_gui(info.object.mic_cal,
                                   filename=None,
