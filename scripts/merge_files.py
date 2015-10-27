@@ -13,4 +13,4 @@ if __name__ == '__main__':
     if args.out is None:
         base, ext = os.path.splitext(args.files[0])
         args.out = '{} (merged){}'.format(base, ext)
-    merge_abr_files(args.files, args.out)
+    merge_files(args.files, args.out)

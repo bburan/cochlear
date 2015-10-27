@@ -11,6 +11,8 @@ setup(
     requires=['numpy'],
     scripts=[
         'scripts/merge_files.py',
+        'scripts/truncate_file.py',
         'scripts/run_cochlear.py',
+        'scripts/remove_trials.py',
     ],
 )

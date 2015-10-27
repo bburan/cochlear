@@ -2,6 +2,7 @@ import os.path
 
 import tables
 import numpy as np
+import pandas as pd
 
 from neurogen.calibration import InterpCalibration
 
@@ -15,6 +16,31 @@ def truncate_file(filename, new_filename, new_size):
             fh_new.copyNode(fh.root.waveforms, fh_new.root)
         fh_new.root.trial_log.truncate(new_size)
         fh_new.root.waveforms.truncate(new_size)
+
+
+def remove_trials(filename, new_filename, filter):
+    if os.path.exists(new_filename):
+        raise IOError('Output file already exists')
+    with tables.open_file(filename, 'r') as fh:
+        trial_log = fh.root.trial_log.read()
+        waveforms = fh.root.waveforms.read()
+
+        # Delete entries that match filter
+        mask = np.ones(len(trial_log), dtype=np.bool)
+        for k, v in filter:
+            mask = mask & (trial_log[k] == v)
+
+        trial_log = trial_log[~mask]
+        waveforms = waveforms[~mask]
+
+        with tables.open_file(new_filename, 'w') as fh_new:
+            fh_new.create_table(fh_new.root, 'trial_log', trial_log)
+            fh_new.create_array(fh_new.root, 'waveforms', waveforms)
+            for node_path in ('/', '/trial_log', '/waveforms'):
+                node = fh.get_node(node_path)
+                new_node = fh_new.get_node(node_path)
+                node._v_attrs._g_copy(new_node._v_attrs)
+
 
 
 def merge_files(filenames, new_filename):
