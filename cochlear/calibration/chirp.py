@@ -183,9 +183,8 @@ def hrtf_calibration(calibration, filename, **kwargs):
 
 if __name__ == '__main__':
     reference_calibration()
-    #import os.path
+    #import logging
+    #logging.basicConfig(level='DEBUG')
     #from neurogen.calibration import InterpCalibration
-    #mic_file = os.path.join('c:/data/cochlear/calibration',
-    #                        '150730 - Golay calibration with 377C10.mic')
-    #c = InterpCalibration.from_mic_file(mic_file)
-    #hrtf_calibration(c, 'temp.hdf5')
+    #calibration = InterpCalibration.as_attenuation()
+    #hrtf_calibration(calibration, 'test.hdf5')

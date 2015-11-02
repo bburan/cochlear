@@ -67,28 +67,31 @@ def tone_power(frequency, gain=0, vrms=1, repetitions=1, fs=200e3, max_thd=0.1,
                input_line=ni.DAQmxDefaults.MIC_INPUT, debug=False):
 
     calibration = InterpCalibration.as_attenuation(vrms=vrms)
-    c = ni.DAQmxChannel(calibration=calibration)
     trim_n = int(trim*fs)
+    token = blocks.Tone(frequency=frequency, level=0)
+    waveform = generate_waveform(token, fs, duration=duration,
+                                 calibration=calibration, vrms=vrms)
+
     daq_kw = {
-        'channels': [c],
+        'waveform': waveform,
         'repetitions': repetitions,
         'output_line': output_line,
         'input_line': input_line,
         'gain': gain,
         'adc_fs': fs,
         'dac_fs': fs,
-        'duration': duration,
         'iti': 0.01
     }
 
-    # Measure the actual output
-    c.token = blocks.Tone(frequency=frequency, level=0)
-    signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+    signal = ni.acquire_waveform(**daq_kw)[:, :, trim_n:-trim_n]
 
     # Measure the noise floor
     if min_db is not None:
-        c.token = blocks.Silence()
-        nf_signal = ni.acquire(**daq_kw)
+        token = blocks.Silence()
+        daq_kw['waveform'] = generate_waveform(token, fs, duration=duration,
+                                               calibration=calibration,
+                                               vrms=vrms)
+        nf_signal = ni.acquire_waveform(**daq_kw)
         nf_signal = nf_signal[:, :, trim_n:-trim_n]
     else:
         nf_signal = np.full_like(signal, np.nan)
@@ -363,6 +366,7 @@ class ChirpCalibration(object):
             'dac_fs': fs,
             'iti': iti,
             'callback': callback,
+            'output_range': vrms*np.sqrt(2)
         }
         self.iface_acquire = ni.DAQmxAcquireWaveform(**daq_kw)
         self.fs = fs
