@@ -36,6 +36,8 @@ class DAQmxDefaults(object):
 
     MIC_INPUT = '/{}/ai0'.format(DEV)
     REF_MIC_INPUT = '/{}/ai1'.format(DEV)
+    #ERP_INPUT = '/{}/ai1'.format(DEV)
+    ERP_INPUT = MIC_INPUT
     AI_RANGE = 10
 
     AO_RANGE = np.sqrt(2)
@@ -170,33 +172,38 @@ def create_ai(ai, fs, expected_range=10, callback=None, callback_samples=None,
     return task
 
 
-def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, callback=None,
-              callback_samples=None, duration=None, done_callback=None,
-              regen=False, start_trigger=None, sample_clock=''):
+def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
+              buffer_size=None, callback=None, callback_samples=None,
+              done_callback=None, start_trigger=None, sample_clock=''):
 
     task = create_task()
-    vmin, vmax = -expected_range, expected_range
-
-    regen_mode = ni.DAQmx_Val_AllowRegen if regen \
-        else ni.DAQmx_Val_DoNotAllowRegen
 
     # Setup analog output and prevent playout of data that has already been
     # played.
-    ni.DAQmxCreateAOVoltageChan(task, ao, '', vmin, vmax,
+    ni.DAQmxCreateAOVoltageChan(task, ao, '', -expected_range, expected_range,
                                 ni.DAQmx_Val_Volts, '')
-    ni.DAQmxSetWriteRegenMode(task, regen_mode)
+    ni.DAQmxSetWriteRegenMode(task, ni.DAQmx_Val_DoNotAllowRegen)
 
     if start_trigger is not None:
         ni.DAQmxCfgDigEdgeStartTrig(task, start_trigger, ni.DAQmx_Val_Rising)
 
-    if duration is None:
+    # Set up the buffer size in advance
+    if buffer_size is not None:
+        log.debug('Setting buffer size to %d based on buffer_size', buffer_size)
+        ni.DAQmxCfgOutputBuffer(task, buffer_size)
+    elif total_samples is not None:
+        m = 'Setting buffer size to %d based on total_samples'
+        log.debug(m, total_samples)
+        ni.DAQmxCfgOutputBuffer(task, total_samples)
+
+    if total_samples is None:
         ni.DAQmxCfgSampClkTiming(task, sample_clock, fs, ni.DAQmx_Val_Rising,
                                  ni.DAQmx_Val_ContSamps, int(fs))
+        log.debug('Configured continuous output')
     else:
-        output_samples = int(duration*fs)
-        log.debug('Configured finite output with %d samples', output_samples)
         ni.DAQmxCfgSampClkTiming(task, sample_clock, fs, ni.DAQmx_Val_Rising,
-                                 ni.DAQmx_Val_FiniteSamps, output_samples)
+                                 ni.DAQmx_Val_FiniteSamps, total_samples)
+        log.debug('Configured finite output with %d samples', total_samples)
 
     # Store a reference to the callback pointers on the task object itself. This
     # prevents the callback pointers from getting garbage-collected. If they get
@@ -204,7 +211,6 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, callback=None,
     if callback is not None:
         task._cb_ptr = create_everynsamples_callback(callback, callback_samples,
                                                      task, 'output')
-        #ni.DAQmxCfgOutputBuffer(task, callback_samples*2)
     if done_callback is not None:
         task._done_cb_ptr = create_done_callback(done_callback, task)
 
@@ -455,6 +461,10 @@ class DAQmxInput(DAQmxBase):
         super(DAQmxInput, self).start()
         self._event.clear()
 
+    def stop(self):
+        super(DAQmxInput, self).stop()
+        self._event.set()
+
 
 class DAQmxChannel(Channel):
 
@@ -470,13 +480,18 @@ class DAQmxChannel(Channel):
         return self.set_attenuation(-gain)
 
     def set_attenuation(self, attenuation):
-        self.attenuator.set_atten(**{self.attenuator_channel: attenuation})
+        self.attenuator.set_attenuation(attenuation, self.attenuator_channel)
         self.attenuation = attenuation
 
     def get_nearest_attenuation(self, atten):
         if self.attenuator is None:
             raise ValueError('Channel does not have attenuation control')
-        return self.attenuator.get_nearest_atten(atten)
+        return self.attenuator.get_nearest_attenuation(atten)
+
+
+def residual_sf(requested, actual):
+    result = [10**((a-r)/20.0) for r, a in zip(requested, actual)]
+    return np.array(result)
 
 
 class DAQmxOutput(DAQmxBase):
@@ -485,7 +500,8 @@ class DAQmxOutput(DAQmxBase):
                  output_line=DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
                  expected_range=DAQmxDefaults.AO_RANGE, buffer_size=2,
                  monitor_interval=0.5, duration=None, done_callback=None,
-                 regen=False, start_trigger=None, attenuations=None, **kwargs):
+                 start_trigger=None, attenuations=None, **kwargs):
+
         variables = locals()
         kwargs = variables.pop('kwargs')
         for k, v in variables.items():
@@ -495,22 +511,25 @@ class DAQmxOutput(DAQmxBase):
 
     def setup(self):
         log.debug('Setting up AO tasks')
-        self.buffer_samples = int(self.fs*self.buffer_size)
-        self.monitor_samples = int(self.fs*self.monitor_interval)
-        log.debug('Buffer size %d, monitor every %d samples',
-                  self.buffer_samples, self.monitor_samples)
 
         kwargs = {}
         if hasattr(self, 'monitor') and self.monitor_interval is not None:
+            self.buffer_samples = int(self.fs*self.buffer_size)
+            self.monitor_samples = int(self.fs*self.monitor_interval)
+            log.debug('Buffer size %d, monitor every %d samples',
+                    self.buffer_samples, self.monitor_samples)
             kwargs['callback'] = self.monitor
             kwargs['callback_samples'] = self.monitor_samples
+            kwargs['total_samples'] = None
+            kwargs['buffer_size'] = self.buffer_samples
+        else:
+            kwargs['total_samples'] = int(self.duration*self.fs)
 
-        self._task_analog = create_ao(self.output_line, self.fs,
+        self._task_analog = create_ao(self.output_line,
+                                      self.fs,
                                       self.expected_range,
-                                      duration=self.duration,
                                       done_callback=self._done_callback,
                                       start_trigger=self.start_trigger,
-                                      regen=self.regen,
                                       **kwargs)
 
         self._tasks.append(self._task_analog)
@@ -524,10 +543,10 @@ class DAQmxOutput(DAQmxBase):
         # the waveform will have to be scaled appropriately before writing.
         self.attenuator = DAQmxBaseAttenuator()
         if self.attenuations is not None:
-            attenuations, residual_scaling_factors = \
+            attenuations = \
                 self.attenuator.get_nearest_attenuations(self.attenuations)
             self.attenuator.set_attenuations(attenuations)
-            self.waveform_sf = np.array(residual_scaling_factors)
+            self.waveform_sf = residual_sf(self.attenuations, attenuations)
         else:
             self.waveform_sf = np.array([1]*self.n_channels)
         super(DAQmxOutput, self).setup()
@@ -620,7 +639,7 @@ class DAQmxBaseAttenuator(DAQmxBase):
         if channel is None:
             attenuations = [attenuation]*self.ATTENUATION_CHANNELS
         else:
-            attenuations = [None]*self.ATTENNUATION_CHANNELS
+            attenuations = [None]*self.ATTENUATION_CHANNELS
             attenuations[channel] = attenuation
         self.set_attenuations(attenuations)
 
@@ -634,17 +653,19 @@ class DAQmxBaseAttenuator(DAQmxBase):
         attenuation_steps = np.array(self.ATTENUATION_STEPS)
         delta = attenuation-attenuation_steps
         nearest_attenuation = attenuation_steps[delta >= 0].max()
-        residual_scaling_factor = 10**((nearest_attenuation-attenuation)/20.0)
-        return nearest_attenuation, residual_scaling_factor
+        #residual_scaling_factor = 10**((nearest_attenuation-attenuation)/20.0)
+        #return nearest_attenuation, residual_scaling_factor
+        return nearest_attenuation
 
     def get_nearest_attenuations(self, attenuations):
-        results = [self.get_nearest_attenuation(a) for a in attenuations]
-        nearest_attenuations, residual_scaling_factors = zip(*results)
-        return nearest_attenuations, residual_scaling_factors
+        #results = [self.get_nearest_attenuation(a) for a in attenuations]
+        #nearest_attenuations, residual_scaling_factors = zip(*results)
+        #return nearest_attenuations, residual_scaling_factors
+        return [self.get_nearest_attenuation(a) for a in attenuations]
 
     def _validate_attenuations(self, attenuations):
         for a in attenuations:
-            if a not in self.ATTENUATION_STEPS:
+            if (a is not None) and (a not in self.ATTENUATION_STEPS):
                 raise ValueError('Unsupported attenuation {}'.format(a))
 
     def set_mute(self, mute):
@@ -1024,6 +1045,8 @@ class DAQmxAcquireWaveform(BaseDAQmxAcquire):
         for k, v in locals().items():
             setattr(self, k, v)
 
+        self.waveform = waveform
+        self.iti = iti
         self.complete = False
         self.waveforms = []
         self.epochs_acquired = 0
@@ -1041,14 +1064,18 @@ class DAQmxAcquireWaveform(BaseDAQmxAcquire):
                                     expected_range=input_range,
                                     start_trigger='ao/StartTrigger',
                                     callback=self.poll)
+
         self.iface_dac = DAQmxOutput(fs=dac_fs,
                                      duration=total_duration,
                                      output_line=output_line,
-                                     regen=True,
                                      expected_range=output_range,
                                      attenuations=[-gain])
 
-        self.iface_dac.write(waveform, iti)
+        # Write all data to the buffer before starting since this is known in
+        # advance. This does not work for an infinite number of repetitions
+        # (obviously).
+        for i in range(repetitions):
+            self.iface_dac.write(waveform, iti)
 
     def start(self):
         log.debug('Starting acquisition')
@@ -1066,21 +1093,5 @@ def acquire_waveform(*args, **kwargs):
 ################################################################################
 # Debugging functions
 ################################################################################
-class TonePlayer(object):
-
-    def __init__(self, fs, frequency,
-                 output_line=DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT):
-        period = frequency**-1
-        period_samples = int(fs*period)
-        t = np.arange(period_samples, dtype=np.float32)/fs
-        waveform = np.cos(2*np.pi*t*frequency)
-        self.iface_dac = DAQmxPlayer(fs=fs, output_line=output_line)
-        self.iface_dac.setup()
-        self.iface_dac.simple_write(waveform)
-
-    def start(self):
-        self.iface_dac.start()
-
-
-def reset(device='Dev1'):
+def reset(device=DAQmxDefaults.DEV):
     ni.DAQmxResetDevice(device)
