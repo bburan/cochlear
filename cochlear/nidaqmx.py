@@ -364,9 +364,10 @@ class DAQmxBase(object):
                 ni.DAQmxStopTask(task)
             except ni.DAQError:
                 pass
-        if hasattr(self, 'complete_callback') \
-                and self.complete_callback is not None:
-            self.complete_callback()
+        if hasattr(self, 'done_callback') \
+                and self.done_callback is not None:
+            log.debug('Triggering done callback')
+            self.done_callback()
 
     def clear(self):
         log.debug('Clearing %s', self.__class__.__name__)
@@ -402,7 +403,7 @@ class DAQmxInput(DAQmxBase):
 
     def __init__(self, fs=25e3, input_line='/PXI4461/ai0', callback=None,
                  callback_samples=None, expected_range=10, run_line=None,
-                 pipeline=None, complete_callback=None, start_trigger=None,
+                 pipeline=None, done_callback=None, start_trigger=None,
                  record_mode=ni.DAQmx_Val_Diff):
         for k, v in locals().items():
             setattr(self, k, v)
@@ -604,8 +605,7 @@ class DAQmxOutput(DAQmxBase):
     def complete(self):
         if self.samples_written != 0:
             return self.status() == self.samples_written
-        else:
-            return False
+        return False
 
     def get_nearest_attenuation(self, attenuation):
         if self.attenuator is None:
