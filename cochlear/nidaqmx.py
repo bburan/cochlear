@@ -5,7 +5,6 @@ Classes for configuring and recording using NIDAQmx compatible devices
 from __future__ import division
 
 import ctypes
-import unittest
 import time
 import importlib
 
@@ -15,13 +14,13 @@ import numpy as np
 from neurogen.channel import Channel
 from neurogen.player import ContinuousPlayer, QueuedPlayer
 from neurogen.blocks import ScalarInput
-from neurogen import prepare_for_write
 
 import threading
 
 import logging
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
+
 
 ################################################################################
 # Current configuration of niDAQmx hardware
@@ -220,7 +219,6 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
                                                      task, 'output')
     if done_callback is not None:
         task._done_cb_ptr = create_done_callback(done_callback, task)
-
 
     # Log configuration info regarding task
     result = ctypes.c_uint32()
@@ -524,7 +522,7 @@ class DAQmxOutput(DAQmxBase):
             self.buffer_samples = int(self.fs*self.buffer_size)
             self.monitor_samples = int(self.fs*self.monitor_interval)
             log.debug('Buffer size %d, monitor every %d samples',
-                    self.buffer_samples, self.monitor_samples)
+                      self.buffer_samples, self.monitor_samples)
             kwargs['callback'] = self.monitor
             kwargs['callback_samples'] = self.monitor_samples
             kwargs['total_samples'] = None
@@ -662,9 +660,6 @@ class DAQmxBaseAttenuator(DAQmxBase):
         return nearest_attenuation
 
     def get_nearest_attenuations(self, attenuations):
-        #results = [self.get_nearest_attenuation(a) for a in attenuations]
-        #nearest_attenuations, residual_scaling_factors = zip(*results)
-        #return nearest_attenuations, residual_scaling_factors
         return [self.get_nearest_attenuation(a) for a in attenuations]
 
     def _validate_attenuations(self, attenuations):
@@ -722,7 +717,7 @@ class DAQmxPGA2310Attenuator(DAQmxBaseAttenuator):
         self._right_setting = None
         self._left_setting = None
         raise ValueError
-        super(DAQmxPGA2310Atten, self).__init__()
+        super(DAQmxPGA2310Attenuator, self).__init__()
 
     def setup(self, gain=-np.inf):
         # Configure the tasks and IO lines
@@ -753,10 +748,10 @@ class DAQmxPGA2310Attenuator(DAQmxBaseAttenuator):
             self.set_gains(gain)
         else:
             self.set_gain(*gain)
-        super(DAQmxPGA2310Atten, self).setup()
+        super(DAQmxPGA2310Attenuator, self).setup()
 
     def start(self):
-        super(DAQmxPGA2310Atten, self).start()
+        super(DAQmxPGA2310Attenuator, self).start()
         self._send_bit(self._task_cs, 1)
         self.set_mute(False)
         self.set_zero_crossing(False)
@@ -766,7 +761,7 @@ class DAQmxPGA2310Attenuator(DAQmxBaseAttenuator):
         for task in (self._task_zc, self._task_mute, self._task_clk,
                      self._task_cs, self._task_sdi):
             ni.DAQmxClearTask(task)
-        super(DAQmxPGA2310Atten, self).clear()
+        super(DAQmxPGA2310Attenuator, self).clear()
 
     def _gain_to_byte(self, gain):
         '''
@@ -965,7 +960,6 @@ class BaseDAQmxAcquire(object):
 
     def poll(self, waveforms):
         log.debug('Received data')
-        lb, ub = self.epochs_acquired, self.epochs_acquired+len(waveforms)
         self.waveforms.append(waveforms)
         self.epochs_acquired += len(waveforms)
         if self.epochs_acquired >= self.repetitions:

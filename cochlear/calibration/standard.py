@@ -1,20 +1,18 @@
 import numpy as np
-import tables
 
-from traits.api import (HasTraits, Instance, Float, Enum, Int, Property,
-                        cached_property, Any)
+from traits.api import (HasTraits, Instance, Float, Int, Property,
+                        cached_property)
 from traitsui.api import View, HSplit, ToolBar, Action, Item, VGroup
 from pyface.api import ImageResource
 from enable.api import ComponentEditor
 from chaco.api import (create_line_plot, PlotAxis, VPlotContainer, DataRange1D,
                        LogMapper, OverlayPlotContainer)
 
-from cochlear.nidaqmx import DAQmxDefaults, ContinuousDAQmxSource
-from experiment import (AbstractController, icon_dir, AbstractData,
-                        AbstractParadigm, AbstractData)
+from cochlear import nidaqmx as ni
+from experiment import (AbstractController, icon_dir, AbstractParadigm,
+                        AbstractData)
 from neurogen.util import db, dbtopa
 from neurogen.calibration.util import psd_freq, psd, rms, tone_power_conv
-from experiment.channel import FileChannel
 
 ADC_FS = 200e3
 
@@ -23,22 +21,19 @@ class StandardCalSettings(AbstractParadigm):
 
     kw = dict(log=True, context=True)
     duration = Float(1, label='Recording duration (sec)', **kw)
-    input = Enum('ai2', ('ai0', 'ai1', 'ai2'), label='Analog input (channel)',
-                 **kw)
     frequency = Float(1000, label='Standard frequency (Hz)', **kw)
     level = Float(114, label='Standard level (dB SPL)', **kw)
 
     traits_view = View(
         VGroup(
             'duration',
-            'input',
             'frequency',
             'level',
         ),
     )
 
 
-class StandardCalController(DAQmxDefaults, AbstractController):
+class StandardCalController(AbstractController):
 
     adc_fs = ADC_FS
     samples_acquired = Int(0)
@@ -54,17 +49,15 @@ class StandardCalController(DAQmxDefaults, AbstractController):
         self.initialize_context()
         self.refresh_context()
         duration = self.get_current_value('duration')
-        input = self.get_current_value('input')
-        input_line = '/{}/{}'.format(self.DEV, input)
-        self.iface_adc = ContinuousDAQmxSource(fs=self.adc_fs,
-                                               input_line=input_line,
-                                               callback=self.poll,
-                                               callback_samples=self.adc_fs/8,
-                                               expected_range=10)
+        input_line = ni.DAQmxDefaults.REF_MIC_INPUT
+        self.iface_adc = ni.DAQmxInput(fs=self.adc_fs,
+                                       input_line=input_line,
+                                       callback=self.poll,
+                                       callback_samples=int(self.adc_fs/8),
+                                       expected_range=10)
         self.samples_acquired = 0
         self.target_samples = int(duration*self.adc_fs)
         self.waveforms = []
-        self.iface_adc.setup()
         self.iface_adc.start()
 
     def stop_experiment(self, info=None):

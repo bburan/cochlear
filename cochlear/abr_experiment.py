@@ -30,6 +30,7 @@ from experiment.channel import FileChannel
 
 from experiment.plots.channel_plot import ChannelPlot
 from experiment.plots.channel_data_range import ChannelDataRange
+from experiment.plots.helpers import add_time_axis
 
 import tables
 
@@ -244,8 +245,8 @@ class ABRController(AbstractController):
         iface_dac.queue_init('Interleaved FIFO')
         iface_dac.queue_append(np.inf, values={'primary.tone.phase': 0},
                                delays=delay_func)
-        #iface_dac.queue_append(np.inf, values={'primary.tone.phase': np.pi},
-        #                       delays=delay_func)
+        iface_dac.queue_append(np.inf, values={'primary.tone.phase': np.pi},
+                               delays=delay_func)
 
         self.waveforms = []
         self.to_acquire = averages
@@ -316,8 +317,6 @@ class _ABRPlot(HasTraits):
              editor=ComponentEditor(width=300, height=300))
     )
 
-
-from experiment.plots.helpers import add_time_axis
 
 class ABRExperiment(AbstractExperiment):
 
@@ -467,7 +466,6 @@ if __name__ == '__main__':
     from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
     import PyDAQmx as pyni
-
     #configure_logging()
 
     mic_file = 'c:/data/cochlear/calibration/150807 - Golay calibration with 377C10.mic'
