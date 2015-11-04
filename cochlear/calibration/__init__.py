@@ -164,32 +164,34 @@ def two_tone_power(f1_frequency, f2_frequency, f1_gain=-50.0, f2_gain=-50.0,
     '''
     cal1 = InterpCalibration.as_attenuation(vrms=f1_vrms)
     cal2 = InterpCalibration.as_attenuation(vrms=f2_vrms)
-    c1 = ni.DAQmxChannel(calibration=cal1)
-    c2 = ni.DAQmxChannel(calibration=cal2)
     trim_n = int(trim*fs)
 
+    t1 = blocks.Tone(frequency=f1_frequency, level=0)
+    t2 = blocks.Tone(frequency=f2_frequency, level=0)
+    w1 = generate_waveform(t1, fs, duration, cal1)[np.newaxis]
+    w2 = generate_waveform(t2, fs, duration, cal2)[np.newaxis]
+    waveforms = np.concatenate((w1, w2), axis=0)
+
     daq_kw = {
-        'channels': [c1, c2],
+        'waveform': waveforms,
         'repetitions': repetitions,
         'output_line': ni.DAQmxDefaults.DUAL_SPEAKER_OUTPUT,
         'input_line': ni.DAQmxDefaults.MIC_INPUT,
-        'gain': (f2_gain, f1_gain),
+        'gain': [f1_gain, f2_gain],
         'adc_fs': fs,
         'dac_fs': fs,
-        'duration': duration,
         'iti': 0.01
     }
 
-    # Measure the actual output
-    c1.token = blocks.Tone(frequency=f1_frequency, level=0)
-    c2.token = blocks.Tone(frequency=f2_frequency, level=0)
-    signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+    signal = ni.acquire_waveform(**daq_kw)[:, :, trim_n:-trim_n]
 
     # Measure the noise floor
     if min_db is not None:
-        c1.token = blocks.Silence()
-        c2.token = blocks.Silence()
-        nf_signal = ni.acquire(**daq_kw)[:, :, trim_n:-trim_n]
+        token = blocks.Silence()
+        w1 = generate_waveform(token, fs, duration, cal1)[np.newaxis]
+        w2 = generate_waveform(token, fs, duration, cal2)[np.newaxis]
+        daq_kw['waveform'] = np.concatenate((w1, w2), axis=0)
+        nf_signal = ni.acquire_waveform(**daq_kw)[:, :, trim_n:-trim_n]
     else:
         nf_signal = np.full_like(signal, np.nan)
 

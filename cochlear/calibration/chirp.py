@@ -1,3 +1,5 @@
+import numpy as np
+
 from traits.api import Float, Property
 from traitsui.api import VGroup, Item
 
@@ -66,7 +68,7 @@ class BaseChirpController(BaseSignalController):
             freq_ub=self.get_current_value('freq_ub'),
             start_atten=self.get_current_value('start_attenuation'),
             end_atten=self.get_current_value('end_attenuation'),
-            vrms=self.get_current_value('amplitude'),
+            vrms=self.get_current_value('amplitude')/np.sqrt(2),
             gain=self.get_current_value('output_gain'),
             repetitions=self.get_current_value('averages'),
             duration=self.get_current_value('duration'),

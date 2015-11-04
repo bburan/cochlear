@@ -27,7 +27,7 @@ class BaseSignalSettings(AbstractParadigm):
     kw = dict(context=True)
 
     output = Enum(('ao0', 'ao1'), label='Analog output (channel)', **kw)
-    amplitude = Float(1, label='Waveform amplitude (Vrms)', **kw)
+    amplitude = Float(1, label='Waveform amplitude (Vpp)', **kw)
     output_gain = Float(0, label='Output gain (dB)', **kw)
     fft_averages = Int(4, label='Number of FFTs', **kw)
     discard = Int(0, label='Discard repetitions', **kw)

@@ -222,7 +222,6 @@ class ABRController(AbstractController):
             pipeline=pipeline,
             expected_range=10,  # 10,000 gain
             complete_callback=self.trial_complete,
-            record_mode=ni.DAQmxInput.DIFF,
             start_trigger='ao/StartTrigger',
         )
 
@@ -261,17 +260,6 @@ class ABRController(AbstractController):
         self.iface_dac = iface_dac
         self.pipeline = pipeline
 
-    def epoch_acquisition(self, waveforms):
-        self.waveforms.append(waveforms)
-        self.current_valid_repetitions += 2
-        self.current_rejects = self.current_repetitions-\
-            self.current_valid_repetitions
-        if self.current_valid_repetitions >= self.to_acquire:
-            raise GeneratorExit
-
-    def running_acquisition(self, data):
-        self.model.data.raw_channel.send(data)
-
     def trial_complete(self):
         self.iface_dac.stop()
         self.iface_dac.clear()
@@ -302,6 +290,17 @@ class ABRController(AbstractController):
                        start_time=self.start_time,
                        end_time=self.end_time,
                        )
+
+    def epoch_acquisition(self, waveforms):
+        self.waveforms.append(waveforms)
+        self.current_valid_repetitions += 2
+        self.current_rejects = self.current_repetitions-\
+            self.current_valid_repetitions
+        if self.current_valid_repetitions >= self.to_acquire:
+            raise GeneratorExit
+
+    def running_acquisition(self, data):
+        self.model.data.raw_channel.send(data)
 
 
 class _ABRPlot(HasTraits):

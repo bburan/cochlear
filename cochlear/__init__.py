@@ -1,6 +1,16 @@
 import logging.config
 
 
+# Set up a verbose debugger level for tracing
+TRACE_LEVEL_NUM = 5
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+def trace(self, message, *args, **kws):
+    # Yes, logger takes its '*args' as 'args'.
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kws)
+logging.Logger.trace = trace
+
+
 def configure_logging(filename=None):
     time_format = '[%(asctime)s] :: %(name)s - %(levelname)s - %(message)s'
     simple_format = '%(name)s - %(message)s'
@@ -20,8 +30,8 @@ def configure_logging(filename=None):
                 },
             },
         'loggers': {
-            '__main__': {'level': 'DEBUG'},
-            'neurogen.calibration': {'level': 'DEBUG'},
+            '__main__': {'level': 'ERROR'},
+            'neurogen.calibration': {'level': 'ERROR'},
             'experiment': {'level': 'ERROR'},
             'cochlear': {'level': 'ERROR'},
             'cochlear.nidaqmx': {'level': 'DEBUG'},
