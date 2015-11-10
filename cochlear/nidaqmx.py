@@ -654,6 +654,7 @@ class DAQmxBaseAttenuator(DAQmxBase):
         self._validate_attenuations(attenuations)
 
     def get_nearest_attenuation(self, attenuation):
+        log.debug('Finding nearest attenuation for %f', attenuation)
         attenuation_steps = np.array(self.ATTENUATION_STEPS)
         delta = attenuation-attenuation_steps
         nearest_attenuation = attenuation_steps[delta >= 0].max()

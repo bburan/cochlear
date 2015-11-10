@@ -108,8 +108,16 @@ def tone_spl(frequency, input_calibration, *args, **kwargs):
     return input_calibration.get_spl(frequency, rms)
 
 
-def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
-                     **kwargs):
+def tone_sens(frequency, input_calibration, gain=-50, vrms=1, *args, **kwargs):
+    output_spl = tone_spl(frequency, input_calibration, gain, vrms, *args,
+                          **kwargs)
+    mesg = 'Output {:.2f}dB SPL at {:.2f}Hz, {:.2f}dB gain, {:.2f}Vrms'
+    log.debug(mesg.format(output_spl, frequency, gain, vrms))
+    output_sens = _to_sens(output_spl, gain, vrms)
+    return output_sens
+
+
+def tone_calibration(frequency, *args, **kwargs):
     '''
     Single output calibration at a fixed frequency
 
@@ -118,12 +126,13 @@ def tone_calibration(frequency, input_calibration, gain=-50, vrms=1, *args,
     sens : dB (V/Pa)
         Sensitivity of output in dB (V/Pa).
     '''
-    output_spl = tone_spl(frequency, input_calibration, gain, vrms, *args,
-                          **kwargs)
-    mesg = 'Output {:.2f}dB SPL at {:.2f}Hz, {:.2f}dB gain, {:.2f}Vrms'
-    log.debug(mesg.format(output_spl, frequency, gain, vrms))
-    output_sens = _to_sens(output_spl, gain, vrms)
+    output_sens = tone_sens(frequency, *args, **kwargs)
     return PointCalibration(frequency, output_sens)
+
+
+def multitone_calibration(frequencies, *args, **kwargs):
+    output_sens = [tone_sens(f, *args, **kwargs) for f in frequencies]
+    return PointCalibration(frequencies, output_sens)
 
 
 def tone_ref_calibration(frequency, gain, input_line=ni.DAQmxDefaults.MIC_INPUT,
