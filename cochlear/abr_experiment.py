@@ -30,8 +30,9 @@ from experiment.coroutine import (coroutine, blocked, counter, call, broadcast,
                                   accumulate)
 from experiment.channel import FileChannel
 
-from experiment.plots.channel_plot import ChannelPlot
+from experiment.plots.extremes_channel_plot import ExtremesChannelPlot
 from experiment.plots.channel_data_range import ChannelDataRange
+from experiment.plots.channel_range_tool import ChannelRangeTool
 from experiment.plots.helpers import add_time_axis
 
 import tables
@@ -225,7 +226,6 @@ class ABRController(AbstractController):
         )
 
         input_samples = int(1.0/repetition_rate*self.adc_fs)
-        print 'input samples', input_samples
 
         iface_adc = ni.DAQmxInput(
             fs=self.adc_fs,
@@ -234,6 +234,7 @@ class ABRController(AbstractController):
             pipeline=pipeline,
             expected_range=10,  # 10,000 gain
             start_trigger='ao/StartTrigger',
+            record_mode=ni.DAQmxInput.PSEUDODIFF,
         )
 
         iface_dac = ni.QueuedDAQmxPlayer(
@@ -255,12 +256,10 @@ class ABRController(AbstractController):
 
         # Set up alternating polarity by shifting the phase np.pi.  Use the
         # Interleaved FIFO queue for this.
-        delay_func = lambda: np.random.uniform(low=0, high=repetition_jitter)
+        #delay_func = lambda: np.random.uniform(low=0, high=repetition_jitter)
         iface_dac.queue_init('Interleaved FIFO')
-        iface_dac.queue_append(averages/2, values={'primary.tone.phase': 0},
-                               delays=delay_func)
-        iface_dac.queue_append(averages/2, values={'primary.tone.phase': np.pi},
-                               delays=delay_func)
+        iface_dac.queue_append(averages/2, values={'primary.tone.phase': 0})
+        iface_dac.queue_append(averages/2, values={'primary.tone.phase': np.pi})
 
         self.token_sequence = collections.deque()
         iface_dac.register('queue_pop', self.queue_pop_cb)
@@ -370,8 +369,10 @@ class ABRExperiment(AbstractExperiment):
         data_range = ChannelDataRange(sources=[new], span=2, trig_delay=0)
         index_mapper = LinearMapper(range=data_range)
         value_mapper = LinearMapper(range=DataRange1D(low_setting=-1, high_setting=1))
-        plot = ChannelPlot(source=new, index_mapper=index_mapper,
-                           value_mapper=value_mapper)
+        plot = ExtremesChannelPlot(source=new, index_mapper=index_mapper,
+                                   value_mapper=value_mapper)
+        tool = ChannelRangeTool(plot)
+        plot.tools.append(tool)
         axis = PlotAxis(component=plot, orientation='left', title='Volts (V)')
         plot.underlays.append(axis)
         add_time_axis(plot, 'bottom', fraction=True)

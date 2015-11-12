@@ -30,10 +30,11 @@ def configure_logging(filename=None):
                 },
             },
         'loggers': {
-            '__main__': {'level': 'ERROR'},
+            '__main__': {'level': 'DEBUG'},
             'neurogen.calibration': {'level': 'ERROR'},
+            'cochlear.calibration': {'level': 'ERROR'},
             'experiment': {'level': 'ERROR'},
-            'cochlear': {'level': 'ERROR'},
+            'cochlear': {'level': 'DEBUG'},
             'cochlear.nidaqmx': {'level': 'DEBUG'},
             },
         'root': {

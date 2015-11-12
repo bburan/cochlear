@@ -1,5 +1,5 @@
 import collections
-from threading import Thread
+from threading import Thread, Event
 
 import numpy as np
 from scipy import signal
@@ -40,27 +40,24 @@ def extract_epochs(epoch_size, queue, buffer_size, target):
         # Newest data is always stored at the end of the ring buffer. To make
         # room, we discard samples from the beginning of the buffer.
         samples = data.shape[-1]
-        a = ring_buffer[samples:]
-        ring_buffer = np.concatenate((a, data), axis=-1)
+        ring_buffer[..., :-samples] = ring_buffer[..., samples:]
+        ring_buffer[..., -samples:] = data
         t0 += samples
 
-        if next_offset is None and queue:
-            next_offset = queue.popleft()
-
         while True:
-            if next_offset < t0:
+            if (next_offset is None) and len(queue) > 0:
+                next_offset = queue.popleft()
+            elif next_offset is None:
+                break
+            elif next_offset < t0:
                 raise SystemError, 'Epoch lost'
             elif (next_offset+epoch_size) > (t0+buffer_size):
                 break
             else:
                 i = next_offset-t0
-                epoch = ring_buffer[..., i:i+epoch_size]
+                epoch = ring_buffer[..., i:i+epoch_size].copy()
                 target.send(epoch)
-                if queue:
-                    next_offset = queue.popleft()
-                else:
-                    next_offset = None
-                    break
+                next_offset = None
 
         data = (yield)
 
@@ -68,9 +65,11 @@ def extract_epochs(epoch_size, queue, buffer_size, target):
 class ABRAcquisition(Thread):
 
     def __init__(self, frequencies, levels, calibration, duration=5e-3,
-                 ramp_duration=0.5e-3, averages=512, window=8e-3,
+                 ramp_duration=0.5e-3, pip_averages=512, window=8.5e-3,
                  reject_threshold=np.inf, repetition_rate=20, adc_fs=200e3,
-                 dac_fs=200e3, stream_callback=None, epoch_callback=None):
+                 dac_fs=200e3, samples_acquired_callback=None,
+                 valid_epoch_callback=None, invalid_epoch_callback=None,
+                 done_callback=None):
 
         for k, v in locals().items():
             setattr(self, k, v)
@@ -80,19 +79,16 @@ class ABRAcquisition(Thread):
             ni.DAQmxChannel(calibration=calibration,
                             attenuator=ni.DAQmxBaseAttenuator())
 
-        # Round up to nearest multiple of 2 since we need to do half at inverted
-        # polarity
-        pip_averages = int(np.ceil(averages/2.0))
+        input_samples = int(1.0/repetition_rate*adc_fs)*5
 
-        # Pipeline to group acquisitions into pairs of two (i.e. alternate
-        # polarity tone-pips), reject the pair if either exceeds artifact
-        # reject, and accumulate the specified averages.  When the specified
-        # number of averages are acquired, the program exits.
         reject = abr_reject(reject_threshold, adc_fs, window,
                             call(self.process_valid_epochs),
                             call(self.process_invalid_epochs))
-        pipeline = broadcast(call(self.process_stream), reject)
-        input_samples = int(1.0/repetition_rate*adc_fs)
+        self.token_offsets = collections.deque()
+        extract = extract_epochs(input_samples, self.token_offsets, dac_fs*10,
+                                 reject)
+        pipeline = broadcast(call(self.process_samples), extract)
+
         iface_adc = ni.DAQmxInput(
             fs=adc_fs,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
@@ -100,21 +96,25 @@ class ABRAcquisition(Thread):
             pipeline=pipeline,
             expected_range=10,
             start_trigger='ao/StartTrigger',
+            record_mode=ni.DAQmxInput.PSEUDODIFF,
         )
 
         iface_dac = ni.QueuedDAQmxPlayer(
+            fs=dac_fs,
             output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
             duration=1.0/repetition_rate,
             buffer_size=0.5,
             monitor_interval=0.05,
+
         )
         iface_dac.add_channel(channel, name='primary')
-        iface_dac.queue_init('Random')
+        iface_dac.queue_init('Interleaved FIFO')
         iface_dac.register('queue_pop', self.queue_pop_cb)
 
-        token_value_map = {}
-        token_acquired = {}
-        waveforms = {}
+        self.value_to_uuid = {}
+        self.uuid_to_value = {}
+        self.current_averages = {}
+        self.waveforms = {}
         for phase in (0, np.pi):
             for level in levels:
                 for frequency in frequencies:
@@ -124,21 +124,23 @@ class ABRAcquisition(Thread):
                         'primary.tone.frequency': frequency,
                     }
                     uuid = iface_dac.queue_append(pip_averages, values=values)
-                    token_value_map[(frequency, level, phase)] = uuid
-                    token_acquired[uuid] = 0
-                    waveforms[uuid] = []
+                    value = (frequency, level, phase)
+                    self.value_to_uuid[value] = uuid
+                    self.uuid_to_value[uuid] = value
+                    self.current_averages[uuid] = 0
+                    self.waveforms[uuid] = []
 
-        self.token_value_map = token_value_map
         self.token_sequence = collections.deque()
-        self.token_acquired = token_acquired
         self.pip_averages = pip_averages
-        self.waveforms = waveforms
 
         attens = iface_dac.get_best_overall_attenuations()
         iface_dac.set_attenuations(attens)
         self.iface_adc = iface_adc
         self.iface_dac = iface_dac
 
+        self.adc_dac_ratio = adc_fs/dac_fs
+
+        self._stop = Event()
         super(ABRAcquisition, self).__init__()
 
     def run(self):
@@ -146,45 +148,58 @@ class ABRAcquisition(Thread):
         self.iface_dac.play_queue(decrement=False)
         self.iface_adc.join()
 
+    def request_stop(self):
+        self._stop.set()
+
+    def stop(self):
+        self.iface_adc.stop()
+        self.iface_dac.stop()
+        if self.done_callback is not None:
+            self.done_callback()
+
     def process_valid_epochs(self, epochs):
         for epoch in epochs:
-            try:
-                token = self.token_sequence.popleft()
-                print token['delay']
-                print token['offset']
-                uuid = token['uuid']
-                self.iface_dac.current_queue.decrement_key(uuid)
-                if self.token_acquired[uuid] < self.pip_averages:
-                    self.waveforms[uuid].append(epoch)
-                    self.token_acquired[uuid] += 1
-                    if self.epoch_callback is not None:
-                        self.epoch_callback()
-            except KeyError:
-                pass
-            except IndexError:
-                self.iface_adc.stop()
-                self.iface_dac.stop()
+            uuid = self.token_sequence.popleft()['uuid']
+            if self.current_averages[uuid] < self.pip_averages:
+                self.waveforms[uuid].append(epoch)
+                if self.valid_epoch_callback is not None:
+                    value = list(self.uuid_to_value[uuid])
+                    value.append(self.current_averages[uuid])
+                    self.valid_epoch_callback(*value, epoch=epoch)
+                self.current_averages[uuid] += 1
+        self.check_status()
+
+    def check_status(self):
+        # If stop has not been requested, then check to see if we've acquired
+        # all the epochs we need.
+        if not self._stop.isSet():
+            for v in self.current_averages.values():
+                if v < self.pip_averages:
+                    return
+        self.stop()
 
     def process_invalid_epochs(self, epochs):
         for epoch in epochs:
-            try:
-                uuid = self.token_sequence.popleft()['uuid']
-            except KeyError:
-                pass
-            except IndexError:
-                self.iface_adc.stop()
-                self.iface_dac.stop()
+            uuid = self.token_sequence.popleft()['uuid']
+            if self.invalid_epoch_callback is not None:
+                value = self.uuid_to_value[uuid]
+                self.invalid_epoch_callback(*value, epoch=epoch)
+        if self._stop.isSet() or self.iface_dac.current_queue.buffer_empty():
+            self.iface_adc.stop()
+            self.iface_dac.stop()
 
-    def process_stream(self, stream):
-        if self.stream_callback is not None:
-            self.stream_callback(stream)
+    def process_samples(self, samples):
+        if self.samples_acquired_callback is not None:
+            self.samples_acquired_callback(samples)
 
     def queue_pop_cb(self, event_type, event_data):
         self.token_sequence.append(event_data)
+        offset = int(event_data['offset']*self.adc_dac_ratio)
+        self.token_offsets.append(offset)
 
     def get_waveforms(self, frequency, level):
-        w1 = self.waveforms[self.token_value_map[frequency, level, 0]]
-        w2 = self.waveforms[self.token_value_map[frequency, level, np.pi]]
+        w1 = self.waveforms[self.value_to_uuid[frequency, level, 0]]
+        w2 = self.waveforms[self.value_to_uuid[frequency, level, np.pi]]
         trials = min(len(w1), len(w2))
         return np.concatenate((w1[:trials], w2[:trials]), axis=0)
 
@@ -211,13 +226,21 @@ def test_acquisition():
                             '150807 - Golay calibration with 377C10.mic')
     input_calibration = InterpCalibration.from_mic_file(mic_file)
     input_calibration.set_fixed_gain(-40)
-    frequencies = [2e3, 4e3, 8e3]
-    levels = [60, 40, 20, 10]
+    frequencies = [2e3, 8e3]
+    levels = [60, 40]
+
+    def samples_acquired_cb(samples):
+        print samples.shape
+
+    def valid_epoch_cb(frequency, level, phase, epoch):
+        print frequency, level, phase, epoch.shape
 
     output_calibration = calibration.multitone_calibration(
         frequencies, input_calibration, gain=-40)
 
-    acq = ABRAcquisition(frequencies, levels, output_calibration, averages=2)
+    acq = ABRAcquisition(frequencies, levels, output_calibration, averages=2,
+                         samples_acquired_callback=samples_acquired_cb,
+                         valid_epoch_callback=valid_epoch_cb)
     acq.start()
     acq.join()
 

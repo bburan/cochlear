@@ -249,8 +249,12 @@ def create_done_callback(callback, task):
 
 def create_everynsamples_callback(callback, samples, task, task_type='input'):
     def event_cb(task, event_type, n_samples, data):
-        callback()
-        return 0
+        try:
+            callback()
+            return 0
+        except StopIteration:
+            return -1
+
     log.debug('Configuring every N samples callback with %d samples', samples)
     cb_ptr = ni.DAQmxEveryNSamplesEventCallbackPtr(event_cb)
     if task_type == 'input':
@@ -397,6 +401,7 @@ class DAQmxBase(object):
 
 class DAQmxInput(DAQmxBase):
 
+    PSEUDODIFF = ni.DAQmx_Val_PseudoDiff
     DIFF = ni.DAQmx_Val_Diff
     NRSE = ni.DAQmx_Val_NRSE
     RSE = ni.DAQmx_Val_RSE
