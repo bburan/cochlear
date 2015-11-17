@@ -38,7 +38,8 @@ class DAQmxDefaults(object):
     ERP_INPUT = '/{}/ai1'.format(DEV)
     AI_RANGE = 10
 
-    AO_RANGE = np.sqrt(2)
+    #AO_RANGE = np.sqrt(2)
+    AO_RANGE = 10
     SPEAKER_OUTPUTS = (
         '/{}/ao0'.format(DEV),
         '/{}/ao1'.format(DEV),
@@ -239,8 +240,13 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
 
 def create_done_callback(callback, task):
     def event_cb(task, status, data):
-        callback()
-        return 0
+        try:
+            log.debug('callback')
+            callback()
+            return 0
+        except StopIteration:
+            return -1
+
     log.debug('Configuring done callback')
     cb_ptr = ni.DAQmxDoneEventCallbackPtr(event_cb)
     ni.DAQmxRegisterDoneEvent(task, 0, cb_ptr, None)
@@ -250,6 +256,7 @@ def create_done_callback(callback, task):
 def create_everynsamples_callback(callback, samples, task, task_type='input'):
     def event_cb(task, event_type, n_samples, data):
         try:
+            log.trace('everynsamples callback')
             callback()
             return 0
         except StopIteration:
@@ -362,6 +369,8 @@ class DAQmxBase(object):
 
     def stop(self):
         log.debug('Stopping %s', self)
+        if self._state != 'running':
+            return
         self._state = 'initialized'
         for task in self._tasks:
             try:
@@ -385,10 +394,6 @@ class DAQmxBase(object):
     def setup(self):
         log.debug('Setting up %s', self.__class__.__name__)
         self._state = 'initialized'
-
-    def __del__(self):
-        if self._state != 'uninitialized':
-            self.clear()
 
     def __enter__(self):
         self.setup()
@@ -474,6 +479,10 @@ class DAQmxInput(DAQmxBase):
 
     def stop(self):
         super(DAQmxInput, self).stop()
+        self._event.set()
+
+    def clear(self):
+        super(DAQmxInput, self).clear()
         self._event.set()
 
 
@@ -662,8 +671,10 @@ class DAQmxBaseAttenuator(DAQmxBase):
         log.debug('Finding nearest attenuation for %f', attenuation)
         attenuation_steps = np.array(self.ATTENUATION_STEPS)
         delta = attenuation-attenuation_steps
-        nearest_attenuation = attenuation_steps[delta >= 0].max()
-        return nearest_attenuation
+        if np.any(delta >= 0):
+            return attenuation_steps[delta >= 0].max()
+        else:
+            return attenuation_steps.min()
 
     def get_nearest_attenuations(self, attenuations):
         return [self.get_nearest_attenuation(a) for a in attenuations]

@@ -39,8 +39,8 @@ icon_dir = [resource_filename('experiment', 'icons')]
 
 push_exception_handler(reraise_exceptions=True)
 
-DAC_FS = 200e3
-ADC_FS = 200e3
+DAC_FS = 100e3
+ADC_FS = 100e3
 
 def dp_freq(start, end, octave_spacing, period, c=1):
     frequencies = expr.octave_space(start, end, octave_spacing)
@@ -121,12 +121,10 @@ class DPOAEParadigm(AbstractParadigm):
         label='f2 frequency (Hz)', **kw)
 
     f1_level = Expression('f2_level+10', label='f1 level (dB SPL)', **kw)
-    #f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
-    #                      label='f2 level (dB SPL)', **kw)
-    f2_level = Expression('exact_order([40, 45])', **kw)
+    f2_level = Expression('exact_order(np.arange(10, 85, 5), c=1)',
+                          label='f2 level (dB SPL)', **kw)
     dpoae_noise_floor = Expression(0, label='DPOAE noise floor (dB SPL)', **kw)
     response_window = Expression('50e-3', label='Response window (s)', **kw)
-    response_overlap = Expression('0.5', label='Response overlap (frac)', **kw)
     exp_mic_gain = Float(40, label='Exp. mic. gain (dB)', **kw)
 
     # Signal acquisition settings.  Increasing time_averages increases SNR by
@@ -143,7 +141,6 @@ class DPOAEParadigm(AbstractParadigm):
                 'spectrum_averages',
                 'dpoae_noise_floor',
                 'response_window',
-                'response_overlap',
                 'exp_mic_gain',
                 label='Acquisition settings',
                 show_border=True,
@@ -232,7 +229,6 @@ class DPOAEController(AbstractController):
             return
 
         response_window = self.get_current_value('response_window')
-        response_overlap = self.get_current_value('response_overlap')
         f1_frequency = self.get_current_value('f1_frequency')
         f2_frequency = self.get_current_value('f2_frequency')
         if self.value_changed('f1_frequency') or \
@@ -313,8 +309,8 @@ class DPOAEController(AbstractController):
             input_line=ni.DAQmxDefaults.MIC_INPUT,
             callback_samples=analysis_samples,
             pipeline=pipeline,
-            expected_range=0.01,
-            complete_callback=self.trial_complete,
+            expected_range=10,
+            done_callback=self.trial_complete,
             start_trigger='ao/StartTrigger',
         )
 

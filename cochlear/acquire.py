@@ -92,11 +92,12 @@ class ABRAcquisition(Thread):
         iface_adc = ni.DAQmxInput(
             fs=adc_fs,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
-            callback_samples=input_samples,
             pipeline=pipeline,
-            expected_range=10,
+            expected_range=1,
             start_trigger='ao/StartTrigger',
             record_mode=ni.DAQmxInput.PSEUDODIFF,
+            callback_samples=input_samples,
+            done_callback=self.stop,
         )
 
         iface_dac = ni.QueuedDAQmxPlayer(
@@ -152,8 +153,8 @@ class ABRAcquisition(Thread):
         self._stop.set()
 
     def stop(self):
-        self.iface_adc.stop()
-        self.iface_dac.stop()
+        self.iface_adc.clear()
+        self.iface_dac.clear()
         if self.done_callback is not None:
             self.done_callback()
 
@@ -232,13 +233,14 @@ def test_acquisition():
     def samples_acquired_cb(samples):
         print samples.shape
 
-    def valid_epoch_cb(frequency, level, phase, epoch):
-        print frequency, level, phase, epoch.shape
+    def valid_epoch_cb(frequency, level, phase, presentation, epoch):
+        print presentation, frequency, level, phase, epoch.shape
 
     output_calibration = calibration.multitone_calibration(
         frequencies, input_calibration, gain=-40)
 
-    acq = ABRAcquisition(frequencies, levels, output_calibration, averages=2,
+    acq = ABRAcquisition(frequencies, levels, output_calibration,
+                         pip_averages=2,
                          samples_acquired_callback=samples_acquired_cb,
                          valid_epoch_callback=valid_epoch_cb)
     acq.start()

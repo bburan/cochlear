@@ -18,6 +18,7 @@ from cochlear import settings
 from cochlear.calibration import chirp, golay
 from cochlear import abr_experiment
 from cochlear import dpoae_experiment
+from cochlear import interleaved_abr_experiment
 
 
 class ExperimentController(Controller):
@@ -43,6 +44,13 @@ class ExperimentController(Controller):
             time=datetime.strftime('%H%M'),
             experiment=experiment)
         return os.path.join(settings.DATA_DIR, filename)
+
+    def run_interleaved_abr_experiment(self, info):
+        filename = self._get_filename(info, 'iABR')
+        interleaved_abr_experiment.launch_gui(info.object.mic_cal,
+                                              filename=filename,
+                                              parent=info.ui.control,
+                                              kind='livemodal')
 
     def run_abr_experiment(self, info):
         filename = self._get_filename(info, 'ABR')
@@ -154,6 +162,12 @@ class ExperimentSetup(HasTraits):
             Action(name='ABR check',
                    image=ImageResource('view_statistics', icon_dir),
                    enabled_when='mic_cal is not None', action='run_abr_check'),
+            Action(name='iABR',
+                   image=ImageResource('view_statistics', icon_dir),
+                   enabled_when='mic_cal is not None '
+                                'and animal '
+                                'and experimenter ',
+                   action='run_interleaved_abr_experiment'),
             Action(name='DPOAE',
                    image=ImageResource('datashowchart', icon_dir),
                    enabled_when='mic_cal is not None '

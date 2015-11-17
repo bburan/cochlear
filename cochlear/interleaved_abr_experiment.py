@@ -54,8 +54,9 @@ class ABRParadigm(AbstractParadigm):
     duration = Float(5e-3, dtype=np.float, **kw)
     ramp_duration = Float(0.5e-3, dtype=np.float, **kw)
 
-    frequencies = List([1000, 2000, 4000, 8000, 16000, 32000], **kw)
-    levels = List([10, 20, 30, 40, 50, 60, 70, 80], **kw)
+    #frequencies = List([1000, 2000, 4000], **kw)
+    frequencies = List([8000, 4000, 2000], **kw)
+    levels = List([60, 80], **kw)
 
     traits_view = View(
         VGroup(
@@ -92,14 +93,15 @@ class ABRController(AbstractController):
 
     mic_cal = Instance('neurogen.calibration.Calibration')
 
-    adc_fs = 100e3
-    dac_fs = 100e3
+    adc_fs = 200e3
+    dac_fs = 200e3
 
     def next_trial(self, info=None):
         frequencies = self.model.paradigm.frequencies
         levels = self.model.paradigm.levels
         window = self.model.paradigm.window
         averages = self.model.paradigm.averages
+        reject_threshold = self.model.paradigm.reject_threshold
         repetition_rate = self.model.paradigm.repetition_rate
         pip_averages = int(np.ceil(averages/2.0))
 
@@ -107,9 +109,9 @@ class ABRController(AbstractController):
                               self.adc_fs)
 
         # Setup the calibration and calibrate each frequency
-        self.mic_cal.set_fixed_gain(self.model.paradigm.exp_mic_gain)
+        self.mic_cal.set_fixed_gain(-self.model.paradigm.exp_mic_gain)
         output_calibration = calibration.multitone_calibration(
-            frequencies, self.mic_cal, gain=-40.0)
+            frequencies, self.mic_cal, gain=-20.0)
 
         self.acq = ABRAcquisition(
             frequencies=self.model.paradigm.frequencies,
@@ -117,6 +119,7 @@ class ABRController(AbstractController):
             calibration=output_calibration,
             pip_averages=pip_averages,
             window=window,
+            reject_threshold=reject_threshold,
             repetition_rate=repetition_rate,
             samples_acquired_callback=self.samples_acquired,
             valid_epoch_callback=self.valid_epoch,
@@ -335,7 +338,6 @@ def launch_gui(mic_cal, filename, paradigm_dict=None, **kwargs):
         experiment.edit_traits(handler=controller, **kwargs)
 
 
-
 if __name__ == '__main__':
     #from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
@@ -348,8 +350,8 @@ if __name__ == '__main__':
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = ABRData(store_node=fh.root)
-        paradigm = ABRParadigm(averages=32, reject_threshold=np.inf,
-                               exp_mic_gain=0, repetition_rate=80)
+        paradigm = ABRParadigm(averages=256, reject_threshold=np.inf,
+                               exp_mic_gain=40, repetition_rate=40)
         experiment = ABRExperiment(paradigm=paradigm, data=data)
         controller = ABRController(mic_cal=c)
         experiment.configure_traits(handler=controller)

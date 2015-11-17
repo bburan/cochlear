@@ -167,6 +167,7 @@ class ABRController(AbstractController):
             frequency, self.mic_cal, gain=self.current_calibration_gain,
             max_thd=None, output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT)
         self.primary_spl = self.primary_sens.get_spl(frequency, 1)
+        print 'spl', self.primary_spl
         self.frequency_changed = True
 
     def set_exp_mic_gain(self, exp_mic_gain):
@@ -232,7 +233,7 @@ class ABRController(AbstractController):
             input_line=ni.DAQmxDefaults.ERP_INPUT,
             callback_samples=input_samples,
             pipeline=pipeline,
-            expected_range=10,  # 10,000 gain
+            expected_range=1,  # 10,000 gain
             start_trigger='ao/StartTrigger',
             record_mode=ni.DAQmxInput.PSEUDODIFF,
         )
@@ -254,9 +255,6 @@ class ABRController(AbstractController):
         iface_dac.add_channel(channel, name='primary')
         self.primary_attenuation = iface_dac.set_best_attenuations()[0]
 
-        # Set up alternating polarity by shifting the phase np.pi.  Use the
-        # Interleaved FIFO queue for this.
-        #delay_func = lambda: np.random.uniform(low=0, high=repetition_jitter)
         iface_dac.queue_init('Interleaved FIFO')
         iface_dac.queue_append(averages/2, values={'primary.tone.phase': 0})
         iface_dac.queue_append(averages/2, values={'primary.tone.phase': np.pi})
@@ -278,7 +276,6 @@ class ABRController(AbstractController):
         self.pipeline = pipeline
 
     def trial_complete(self):
-        #self.iface_dac.stop()
         self.iface_adc.stop()
         self.iface_dac.clear()
         self.iface_adc.clear()
