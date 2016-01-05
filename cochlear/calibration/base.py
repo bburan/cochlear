@@ -114,20 +114,23 @@ class BaseSignalExperiment(HasTraits):
     sig_waveform_plot = Instance(Component)
     mic_waveform_plot = Instance(Component)
     mic_psd_plot = Instance(Component)
+    mic_phase_plot = Instance(Component)
     sig_psd_plot = Instance(Component)
+    sig_phase_plot = Instance(Component)
     speaker_spl_plot = Instance(Component)
     exp_mic_sens_plot = Instance(Component)
 
     KEYS = ('time', 'sig_waveform', 'exp_mic_waveform', 'ref_mic_waveform',
             'frequency', 'ref_mic_psd', 'exp_mic_psd', 'sig_psd', 'speaker_spl',
-            'exp_mic_sens')
+            'exp_mic_sens', 'exp_mic_phase', 'ref_mic_phase', 'sig_phase')
 
     def update_plots(self, results, freq_lb=500, freq_ub=50e3):
         for k in self.KEYS:
             if k in results:
                 self.plot_data.set_data(k, results[k][1:])
-        for plot in (self.mic_psd_plot, self.sig_psd_plot,
-                     self.exp_mic_sens_plot, self.speaker_spl_plot):
+        for plot in (self.mic_psd_plot, self.mic_phase_plot, self.sig_psd_plot,
+                     self.sig_phase_plot, self.exp_mic_sens_plot,
+                     self.speaker_spl_plot):
             plot.index_mapper.range.low_setting = freq_lb*0.9
             plot.index_mapper.range.high_setting = freq_ub*1.1
 
@@ -164,6 +167,16 @@ class BaseSignalExperiment(HasTraits):
         plot.value_axis.title = 'Power (dB)'
         return plot
 
+    def _mic_phase_plot_default(self):
+        plot = Plot(self.plot_data, padding=[75, 25, 25, 50],
+                    title='Microphone Phase')
+        plot.plot(('frequency', 'ref_mic_phase'), index_scale='log',
+                  color='black')
+        plot.plot(('frequency', 'exp_mic_phase'), index_scale='log', color='red')
+        plot.index_axis.title = 'Frequency (Hz)'
+        plot.value_axis.title = 'Phase (radians)'
+        return plot
+
     def _speaker_spl_plot_default(self):
         plot = Plot(self.plot_data, padding=[75, 25, 25, 50],
                     title='Speaker Output')
@@ -177,6 +190,14 @@ class BaseSignalExperiment(HasTraits):
         plot = Plot(self.plot_data, padding=[75, 25, 25, 50],
                     title='Signal Spectrum')
         plot.plot(('frequency', 'sig_psd'), index_scale='log', color='black')
+        plot.index_axis.title = 'Frequency (Hz)'
+        plot.value_axis.title = 'Power (dB)'
+        return plot
+
+    def _sig_phase_plot_default(self):
+        plot = Plot(self.plot_data, padding=[75, 25, 25, 50],
+                    title='Signal Spectrum')
+        plot.plot(('frequency', 'sig_phase'), index_scale='log', color='black')
         plot.index_axis.title = 'Frequency (Hz)'
         plot.value_axis.title = 'Power (dB)'
         return plot
@@ -195,15 +216,19 @@ class BaseSignalExperiment(HasTraits):
              height=200, show_label=False),
         Item('mic_psd_plot', editor=ComponentEditor(), width=500, height=200,
              show_label=False),
+        Item('mic_phase_plot', editor=ComponentEditor(), width=500, height=200,
+             show_label=False),
         Item('exp_mic_sens_plot', editor=ComponentEditor(), width=500,
              height=200, show_label=False),
-        label='Mic response',
+        label='Mic PSD',
     )
 
     signal_plots = VGroup(
         Item('sig_waveform_plot', editor=ComponentEditor(),
                 width=500, height=200, show_label=False),
         Item('sig_psd_plot', editor=ComponentEditor(),
+                width=500, height=200, show_label=False),
+        Item('sig_phase_plot', editor=ComponentEditor(),
                 width=500, height=200, show_label=False),
         Item('speaker_spl_plot', editor=ComponentEditor(),
                 width=500, height=200, show_label=False),
@@ -333,6 +358,8 @@ class HRTFExperimentMixin(HasTraits):
         Item('mic_waveform_plot', editor=ComponentEditor(), width=500,
              height=200, show_label=False),
         Item('mic_psd_plot', editor=ComponentEditor(), width=500, height=200,
+             show_label=False),
+        Item('mic_phase_plot', editor=ComponentEditor(), width=500, height=200,
              show_label=False),
         label='Mic response',
     )

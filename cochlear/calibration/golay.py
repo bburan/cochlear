@@ -98,7 +98,8 @@ class ReferenceCalibrationController(ReferenceControllerMixin,
         exp_mic_waveform, ref_mic_waveform = \
             results['mic_waveforms'].mean(axis=0)
 
-        exp_mic_psd, ref_mic_psd = db(results['tf'])
+        exp_mic_psd, ref_mic_psd = db(results['tf_psd'])
+        exp_mic_phase, ref_mic_phase = results['tf_phase']
         exp_mic_sens = exp_mic_psd+db(ref_mic_sens)-ref_mic_psd
         if smoothing_window > 0:
             w = signal.hanning(smoothing_window)
@@ -109,6 +110,8 @@ class ReferenceCalibrationController(ReferenceControllerMixin,
         results['ref_mic_waveform'] = ref_mic_waveform
         results['ref_mic_psd'] = ref_mic_psd
         results['exp_mic_psd'] = exp_mic_psd
+        results['ref_mic_phase'] = ref_mic_phase
+        results['exp_mic_phase'] = exp_mic_phase
         results['exp_mic_sens'] = exp_mic_sens
         results['speaker_spl'] = ref_mic_psd-db(ref_mic_sens)-db(20e-6)
         results['frequency'] = results['mic_frequency']

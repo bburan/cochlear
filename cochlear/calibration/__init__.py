@@ -11,7 +11,7 @@ from neurogen.calibration import (PointCalibration, InterpCalibration,
                                   CalibrationNFError)
 from neurogen import generate_waveform
 from neurogen.util import db
-from neurogen.calibration.util import (tone_power_conv, psd, psd_freq, thd,
+from neurogen.calibration.util import (tone_power_conv, csd, psd_freq, thd,
                                        golay_pair, golay_transfer_function)
 
 from .. import nidaqmx as ni
@@ -407,10 +407,14 @@ class ChirpCalibration(object):
 
         mic_frequency = psd_freq(mic_waveforms[0, 0, :], self.fs)
         sig_frequency = psd_freq(self.sig_waveform, self.fs)
-        mic_psd = psd(mic_waveforms, self.fs, fft_window, waveform_averages)
-        sig_psd = psd(self.sig_waveform, self.fs, fft_window)
 
-        mic_psd = mic_psd.mean(axis=0)
+        mic_csd = csd(mic_waveforms, self.fs, fft_window, waveform_averages)
+        mic_phase = np.unwrap(np.angle(mic_csd)).mean(axis=0)
+        mic_psd = np.mean(2*np.abs(mic_csd)/np.sqrt(2.0), axis=0)
+
+        sig_csd = csd(self.sig_waveform, self.fs, fft_window)
+        sig_phase = np.unwrap(np.angle(sig_csd))
+        sig_psd = 2*np.abs(sig_csd)/np.sqrt(2.0)
 
         return {
             'fs': self.fs,
@@ -418,6 +422,9 @@ class ChirpCalibration(object):
             'sig_frequency': sig_frequency,
             'mic_psd': mic_psd,
             'sig_psd': sig_psd,
+            'mic_phase_raw': mic_phase,
+            'mic_phase': mic_phase-sig_phase[np.newaxis],
+            'sig_phase': sig_phase,
             'time': time,
             'sig_waveform': self.sig_waveform,
             'mic_waveforms': mic_waveforms,
@@ -491,13 +498,16 @@ class GolayCalibration(object):
         mic_waveforms = np.concatenate((self.a_waveforms, self.b_waveforms),
                                        axis=-1)
         sig_waveform = np.concatenate((self.a, self.b), axis=-1)
-        sig_psd = psd(sig_waveform, self.fs)
+        sig_csd = csd(sig_waveform, self.fs)
+        sig_phase = np.unwrap(np.angle(sig_csd))
+        sig_psd = 2*np.abs(sig_csd)/np.sqrt(2.0)
         sig_frequency = psd_freq(sig_waveform, self.fs)
 
         result.update({
             'mic_waveforms': mic_waveforms,
             'sig_waveform': sig_waveform,
             'sig_psd': sig_psd,
+            'sig_phase': sig_phase,
             'sig_frequency': sig_frequency,
         })
         return result
@@ -517,8 +527,10 @@ def summarize_golay(fs, a, b, a_response, b_response, waveform_averages=None,
         b_response = b_response/input_gains
 
     time = np.arange(a_response.shape[-1])/fs
-    freq, tf = golay_transfer_function(a, b, a_response, b_response, fs)
-    tf = tf.mean(axis=0)
+    freq, tf_psd, tf_phase = golay_transfer_function(a, b, a_response,
+                                                     b_response, fs)
+    tf_psd = tf_psd.mean(axis=0)
+    tf_phase = tf_phase.mean(axis=0)
 
     return {
         'fs': fs,
@@ -527,7 +539,8 @@ def summarize_golay(fs, a, b, a_response, b_response, waveform_averages=None,
         'a_response': a_response,
         'b_response': b_response,
         'time': time,
-        'tf': tf,
+        'tf_psd': tf_psd,
+        'tf_phase': tf_phase,
         'mic_frequency': freq,
     }
 
