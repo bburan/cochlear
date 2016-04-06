@@ -302,6 +302,7 @@ class DPOAEController(AbstractController):
             duration=120,
             buffer_size=10,
             monitor_interval=1,
+            expected_range=10,
         )
 
         self.iface_adc = ni.DAQmxInput(
