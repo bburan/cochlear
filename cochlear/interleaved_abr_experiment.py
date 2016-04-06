@@ -1,10 +1,12 @@
 import logging
 log = logging.getLogger(__name__)
 
-from traits.api import (Instance, Float, Int, push_exception_handler, Bool,
-                        HasTraits, Str, List, Property, on_trait_change, Dict)
-from traitsui.api import (View, Item, ToolBar, Action, ActionGroup, VGroup,
-                          HSplit, VSplit, Tabbed, HGroup, Include, ListEditor)
+from collections import defaultdict
+
+from traits.api import (Instance, Float, push_exception_handler, Bool,
+                        HasTraits, Str, List, Dict, Button, Event)
+from traitsui.api import (View, Item, ToolBar, Action, VGroup, HSplit, Tabbed,
+                          Include, ListEditor, ListStrEditor)
 from enable.api import Component, ComponentEditor
 from pyface.api import ImageResource
 from chaco.api import (LinearMapper, DataRange1D, PlotAxis, VPlotContainer,
@@ -54,9 +56,17 @@ class ABRParadigm(AbstractParadigm):
     duration = Float(5e-3, dtype=np.float, **kw)
     ramp_duration = Float(0.5e-3, dtype=np.float, **kw)
 
-    #frequencies = List([1000, 2000, 4000], **kw)
     frequencies = List([8000, 4000, 2000], **kw)
     levels = List([60, 80], **kw)
+
+    add_frequency = Button('+')
+    add_level = Button('+')
+
+    def _add_frequency_fired(self):
+        self.frequencies.append('')
+
+    def _add_level_fired(self):
+        self.levels.append('')
 
     traits_view = View(
         VGroup(
@@ -67,8 +77,18 @@ class ABRParadigm(AbstractParadigm):
                 show_border=True,
             ),
             VGroup(
-                'frequencies',
-                'levels',
+                VGroup(
+                    Item('frequencies',
+                         editor=ListStrEditor(auto_add=True, editable=True)),
+                    'add_frequency',
+                    show_labels=False
+                ),
+                VGroup(
+                    Item('levels',
+                         editor=ListStrEditor(auto_add=True, editable=True)),
+                    'add_level',
+                    show_labels=False
+                ),
                 'duration',
                 'ramp_duration',
                 'repetition_rate',
@@ -93,12 +113,16 @@ class ABRController(AbstractController):
 
     mic_cal = Instance('neurogen.calibration.Calibration')
 
-    adc_fs = 200e3
-    dac_fs = 200e3
+    adc_fs = 100e3
+    dac_fs = 100e3
+
+    epoch_info = List()
+    epoch_info_lookup = Dict()
+    epoch_info_updated = Event()
 
     def next_trial(self, info=None):
-        frequencies = self.model.paradigm.frequencies
-        levels = self.model.paradigm.levels
+        frequencies = [float(f) for f in self.model.paradigm.frequencies]
+        levels = [float(l) for l in self.model.paradigm.levels]
         window = self.model.paradigm.window
         averages = self.model.paradigm.averages
         reject_threshold = self.model.paradigm.reject_threshold
@@ -114,8 +138,8 @@ class ABRController(AbstractController):
             frequencies, self.mic_cal, gain=-20.0)
 
         self.acq = ABRAcquisition(
-            frequencies=self.model.paradigm.frequencies,
-            levels=self.model.paradigm.levels,
+            frequencies=frequencies,
+            levels=levels,
             calibration=output_calibration,
             pip_averages=pip_averages,
             window=window,
@@ -124,25 +148,37 @@ class ABRController(AbstractController):
             samples_acquired_callback=self.samples_acquired,
             valid_epoch_callback=self.valid_epoch,
             invalid_epoch_callback=self.invalid_epoch,
-            done_callback=self.stop,
+            done_callback=self.acquisition_done,
             adc_fs=self.adc_fs,
             dac_fs=self.dac_fs,
         )
+
+        for frequency in frequencies:
+            for level in levels:
+                ei = dict(frequency=frequency, level=level, valid=0, invalid=0)
+                self.epoch_info.append(ei)
+                self.epoch_info_lookup[frequency, level] = ei
+
         self.acq.start()
+
+    def acquisition_done(self, state):
+        self.stop()
 
     def request_stop(self, info=None):
         self.acq.stop()
         self.acq.join()
-        self.stop()
 
     def stop_experiment(self, info=None):
         pass
 
     def valid_epoch(self, frequency, level, polarity, presentation, epoch):
+        self.epoch_info_lookup[frequency, level]['valid'] += 1
         self.model.save_epoch(frequency, level, polarity, presentation, epoch)
+        self.epoch_info_updated = True
 
     def invalid_epoch(self, level, frequency, polarity, epoch):
-        pass
+        self.epoch_info_lookup[frequency, level]['invalid'] += 1
+        self.epoch_info_updated = True
 
     def samples_acquired(self, samples):
         self.model.data.signal.send(samples.ravel())
@@ -176,6 +212,21 @@ class ABRData(AbstractData):
         self.waveforms = self.fh.create_array(self.store_node, 'waveforms',
                                               None, atom=tables.Float32Atom(),
                                               shape=shape)
+
+
+from traitsui.api import VGroup, Item, TabularEditor
+from traitsui.tabular_adapter import TabularAdapter
+
+class EpochAdapter(TabularAdapter):
+
+    columns = ['frequency', 'level', 'valid', 'invalid']
+
+    def get_content(self, object, trait, row, column):
+        return getattr(object, trait)[row][self.columns[column]]
+
+
+epoch_editor = TabularEditor(adapter=EpochAdapter(), editable=False,
+                             update='handler.epoch_info_updated')
 
 
 class ABRExperiment(AbstractExperiment):
@@ -237,7 +288,8 @@ class ABRExperiment(AbstractExperiment):
         container = OverlayPlotContainer(padding=[75, 20, 20, 50])
         data_range = ChannelDataRange(sources=[signal], span=1, trig_delay=.1)
         index_mapper = LinearMapper(range=data_range)
-        value_mapper = LinearMapper(range=DataRange1D(low_setting=-.001, high_setting=.001))
+        value_range = DataRange1D(low_setting=-.001, high_setting=.001)
+        value_mapper = LinearMapper(range=value_range)
         plot = ExtremesChannelPlot(source=signal, index_mapper=index_mapper,
                                    value_mapper=value_mapper)
         tool = ChannelRangeTool(plot)
@@ -247,7 +299,6 @@ class ABRExperiment(AbstractExperiment):
         add_time_axis(plot, 'bottom', fraction=True)
         container.add(plot)
         self.running_plot = container
-
 
     def update_plots(self, fs, waveforms):
         b, a = signal.iirfilter(output='ba', N=1, Wn=(0.2e3/fs, 10e3/fs),
@@ -277,7 +328,8 @@ class ABRExperiment(AbstractExperiment):
                     Item('paradigm', style='custom', show_label=False,
                          width=200,
                          enabled_when='not handler.state=="running"'),
-                    Include('context_group'),
+                    Item('handler.epoch_info', editor=epoch_editor,
+                         show_label=False),
                 ),
                 VGroup(
                     label='Diagnostics',
@@ -314,9 +366,6 @@ class ABRExperiment(AbstractExperiment):
             Action(name='Resume', action='resume',
                    image=ImageResource('player_fwd', icon_dir),
                    enabled_when='handler.state=="paused"'),
-            '-',
-            #Action(name='Log event', action='log_event',
-            #       image=ImageResource('player_fwd', icon_dir)),
         ),
         id='lbhb.ABRExperiment',
     )
@@ -339,19 +388,18 @@ def launch_gui(mic_cal, filename, paradigm_dict=None, **kwargs):
 
 
 if __name__ == '__main__':
-    #from cochlear import configure_logging
     from neurogen.calibration import InterpCalibration
-    #import PyDAQmx as pyni
-    #configure_logging()
+    import os.path
 
-    mic_file = 'c:/data/cochlear/calibration/150807 - Golay calibration with 377C10.mic'
+    mic_file = os.path.join('c:/data/cochlear/calibration',
+                            '150807 - Golay calibration with 377C10.mic')
     c = InterpCalibration.from_mic_file(mic_file)
-
     log.debug('====================== MAIN =======================')
     with tables.open_file('temp.hdf5', 'w') as fh:
         data = ABRData(store_node=fh.root)
         paradigm = ABRParadigm(averages=256, reject_threshold=np.inf,
-                               exp_mic_gain=40, repetition_rate=40)
+                               exp_mic_gain=40, repetition_rate=40,
+                               frequencies=['1420'], levels=[80])
         experiment = ABRExperiment(paradigm=paradigm, data=data)
         controller = ABRController(mic_cal=c)
         experiment.configure_traits(handler=controller)

@@ -1,3 +1,6 @@
+import logging
+log = logging.getLogger(__name__)
+
 import collections
 from threading import Thread, Event
 
@@ -50,7 +53,7 @@ def extract_epochs(epoch_size, queue, buffer_size, target):
             elif next_offset is None:
                 break
             elif next_offset < t0:
-                raise SystemError, 'Epoch lost'
+                raise SystemError('Epoch lost')
             elif (next_offset+epoch_size) > (t0+buffer_size):
                 break
             else:
@@ -71,6 +74,7 @@ class ABRAcquisition(Thread):
                  valid_epoch_callback=None, invalid_epoch_callback=None,
                  done_callback=None):
 
+        log.debug('Initializing ABR acquisition')
         for k, v in locals().items():
             setattr(self, k, v)
 
@@ -95,7 +99,7 @@ class ABRAcquisition(Thread):
             pipeline=pipeline,
             expected_range=1,
             start_trigger='ao/StartTrigger',
-            record_mode=ni.DAQmxInput.PSEUDODIFF,
+            record_mode=ni.DAQmxInput.DIFF,
             callback_samples=input_samples,
             done_callback=self.stop,
         )
@@ -142,23 +146,31 @@ class ABRAcquisition(Thread):
         self.adc_dac_ratio = adc_fs/dac_fs
 
         self._stop = Event()
+        self.state = 'initialized'
         super(ABRAcquisition, self).__init__()
 
     def run(self):
         self.iface_adc.start()
         self.iface_dac.play_queue(decrement=False)
+        self.state = 'running'
         self.iface_adc.join()
 
     def request_stop(self):
+        log.debug('Stop requested')
         self._stop.set()
 
     def stop(self):
+        log.debug('Stopping acquisition')
+        self._stop.clear()
         self.iface_adc.clear()
         self.iface_dac.clear()
         if self.done_callback is not None:
-            self.done_callback()
+            log.debug('Notifying callback')
+            self.done_callback(self.state)
 
     def process_valid_epochs(self, epochs):
+        if self.state != 'running':
+            return
         for epoch in epochs:
             uuid = self.token_sequence.popleft()['uuid']
             if self.current_averages[uuid] < self.pip_averages:
@@ -173,13 +185,20 @@ class ABRAcquisition(Thread):
     def check_status(self):
         # If stop has not been requested, then check to see if we've acquired
         # all the epochs we need.
-        if not self._stop.isSet():
+        if self._stop.isSet():
+            log.debug('Stop requested')
+            self.state = 'aborted'
+            self.stop()
+        else:
             for v in self.current_averages.values():
                 if v < self.pip_averages:
                     return
-        self.stop()
+            self.state = 'complete'
+            self.stop()
 
     def process_invalid_epochs(self, epochs):
+        if self.state != 'running':
+            return
         for epoch in epochs:
             uuid = self.token_sequence.popleft()['uuid']
             if self.invalid_epoch_callback is not None:
@@ -190,6 +209,8 @@ class ABRAcquisition(Thread):
             self.iface_dac.stop()
 
     def process_samples(self, samples):
+        if self.state != 'running':
+            return
         if self.samples_acquired_callback is not None:
             self.samples_acquired_callback(samples)
 
