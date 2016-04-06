@@ -38,7 +38,6 @@ class DAQmxDefaults(object):
     ERP_INPUT = '/{}/ai1'.format(DEV)
     AI_RANGE = 10
 
-    #AO_RANGE = np.sqrt(2)
     AO_RANGE = 10
     SPEAKER_OUTPUTS = (
         '/{}/ao0'.format(DEV),
@@ -125,7 +124,7 @@ def create_event_timer(trigger, fs, counter='/Dev1/Ctr0',
 
 def create_ai(ai, fs, expected_range=10, callback=None, callback_samples=None,
               sample_clock='', start_trigger=None,
-              record_mode=ni.DAQmx_Val_Diff, coupling=ni.DAQmx_Val_AC):
+              record_mode=ni.DAQmx_Val_Diff, coupling=ni.DAQmx_Val_DC):
     '''
     Parameters
     ----------
@@ -228,6 +227,7 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
     ni.DAQmxGetBufOutputOnbrdBufSize(task, result)
     log.debug('AO onboard buffer size %d', result.value)
 
+    ni.DAQmxSetAOGain(task, ao, 0)
     result = ctypes.c_double()
     ni.DAQmxGetAOGain(task, ao, result)
     log.debug('AO gain for %s is %.2f', ao, result.value)
@@ -376,6 +376,7 @@ class DAQmxBase(object):
             try:
                 ni.DAQmxStopTask(task)
             except ni.DAQError:
+                raise
                 pass
         if hasattr(self, 'done_callback') \
                 and self.done_callback is not None:
@@ -411,10 +412,13 @@ class DAQmxInput(DAQmxBase):
     NRSE = ni.DAQmx_Val_NRSE
     RSE = ni.DAQmx_Val_RSE
 
+    COUPLING_DC = ni.DAQmx_Val_DC
+    COUPLING_AC = ni.DAQmx_Val_AC
+
     def __init__(self, fs=25e3, input_line='/PXI4461/ai0', callback=None,
                  callback_samples=None, expected_range=10, run_line=None,
                  pipeline=None, done_callback=None, start_trigger=None,
-                 record_mode=ni.DAQmx_Val_Diff):
+                 record_mode=ni.DAQmx_Val_Diff, coupling=ni.DAQmx_Val_DC):
         for k, v in locals().items():
             setattr(self, k, v)
         super(DAQmxInput, self).__init__()
@@ -427,7 +431,8 @@ class DAQmxInput(DAQmxBase):
                                       callback=self.trigger_callback,
                                       callback_samples=self.callback_samples,
                                       start_trigger=self.start_trigger,
-                                      record_mode=self.record_mode)
+                                      record_mode=self.record_mode,
+                                      coupling=self.coupling)
 
         self._tasks.append(self._task_analog)
         self.channels = num_channels(self._task_analog)
@@ -588,6 +593,10 @@ class DAQmxOutput(DAQmxBase):
         return write_size
 
     def write(self, analog, iti=0):
+        result = ctypes.c_double()
+        ni.DAQmxGetAOGain(self._task_analog, self.output_line, result)
+        log.debug('AO gain for %s is %.2f', self.output_line, result.value)
+
         analog = np.asarray(analog)*self.waveform_sf[..., np.newaxis]
         if iti:
             samples = int(iti*self.fs)
@@ -1050,6 +1059,7 @@ def acquire(*args, **kwargs):
     return daq.get_waveforms()
 
 
+
 class DAQmxAcquireWaveform(BaseDAQmxAcquire):
 
     def __init__(self, waveform, repetitions, output_line, input_line, gain,
@@ -1078,12 +1088,14 @@ class DAQmxAcquireWaveform(BaseDAQmxAcquire):
                                     input_line=input_line,
                                     expected_range=input_range,
                                     start_trigger='ao/StartTrigger',
-                                    callback=self.poll)
+                                    callback=self.poll,
+                                    coupling=ni.DAQmx_Val_AC)
 
         if not np.iterable(gain):
             attenuations = [-gain]
         else:
             attenuations = [-g for g in gain]
+
         self.iface_dac = DAQmxOutput(fs=dac_fs,
                                      duration=total_duration,
                                      output_line=output_line,
