@@ -74,6 +74,7 @@ class BaseChirpController(BaseSignalController):
             duration=self.get_current_value('duration'),
             rise_time=self.get_current_value('rise_time'),
             iti=self.get_current_value('iti'),
+            input_range=self.get_current_value('exp_range'),
             fs=self.adc_fs,
             output_line=analog_output,
             input_line=self.MIC_INPUT,

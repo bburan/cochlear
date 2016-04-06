@@ -347,7 +347,7 @@ class ChirpCalibration(object):
 
     def __init__(self, freq_lb=50, freq_ub=100e3, start_atten=0, end_atten=0,
                  vrms=1, gain=0, repetitions=32, duration=0.1, rise_time=0.001,
-                 iti=0.01, fs=200e3,
+                 iti=0.01, fs=200e3, input_range=10,
                  output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
                  input_line=ni.DAQmxDefaults.MIC_INPUT, callback=None):
 
@@ -377,7 +377,8 @@ class ChirpCalibration(object):
             'dac_fs': fs,
             'iti': iti,
             'callback': callback,
-            'output_range': vrms*np.sqrt(2)
+            'output_range': 10,
+            'input_range': input_range,
         }
         self.iface_acquire = ni.DAQmxAcquireWaveform(**daq_kw)
         self.fs = fs
