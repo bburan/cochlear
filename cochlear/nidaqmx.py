@@ -184,7 +184,6 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
 
     # Setup analog output and prevent playout of data that has already been
     # played.
-    expected_range = 1
     ni.DAQmxCreateAOVoltageChan(task, ao, '', -expected_range, expected_range,
                                 ni.DAQmx_Val_Volts, '')
     ni.DAQmxSetAOTermCfg(task, ao, terminal)
@@ -211,6 +210,7 @@ def create_ao(ao, fs, expected_range=DAQmxDefaults.AO_RANGE, total_samples=None,
                                  ni.DAQmx_Val_FiniteSamps, total_samples)
         log.debug('Configured finite output with %d samples', total_samples)
 
+    ni.DAQmxTaskControl(task, ni.DAQmx_Val_Task_Commit)
     # Store a reference to the callback pointers on the task object itself. This
     # prevents the callback pointers from getting garbage-collected. If they get
     # garbage-collected, then the callback no longer exists!
