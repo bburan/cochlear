@@ -223,7 +223,6 @@ class DPOAEController(AbstractController):
             self.stop()
             return
         except Exception as e:
-            raise
             error(None, str(e))
             self.stop()
             return
@@ -234,6 +233,7 @@ class DPOAEController(AbstractController):
         if self.value_changed('f1_frequency') or \
                 self.value_changed('f2_frequency'):
             self.calibrate_speakers(f1_frequency, f2_frequency)
+            log.debug('Speaker calibration complete')
 
         self.dpoae_frequency = 2*f1_frequency-f2_frequency
         self.dp_frequency = f2_frequency-f1_frequency
@@ -302,7 +302,7 @@ class DPOAEController(AbstractController):
             duration=120,
             buffer_size=10,
             monitor_interval=1,
-            expected_range=10,
+            expected_range=2,
         )
 
         self.iface_adc = ni.DAQmxInput(
@@ -313,6 +313,7 @@ class DPOAEController(AbstractController):
             expected_range=10,
             done_callback=self.trial_complete,
             start_trigger='ao/StartTrigger',
+            coupling=ni.DAQmxInput.COUPLING_AC,
         )
 
         # Ordering is important.  First channel is sent to ao0, second channel

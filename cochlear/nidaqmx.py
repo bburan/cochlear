@@ -38,6 +38,7 @@ class DAQmxDefaults(object):
     ERP_INPUT = '/{}/ai1'.format(DEV)
     AI_RANGE = 10
 
+    SPEAKER_RANGE = 2
     AO_RANGE = 10
     SPEAKER_OUTPUTS = (
         '/{}/ao0'.format(DEV),
@@ -422,6 +423,7 @@ class DAQmxInput(DAQmxBase):
         for k, v in locals().items():
             setattr(self, k, v)
         super(DAQmxInput, self).__init__()
+        self.setup()
 
     def setup(self):
         log.debug('Setting up continuous AI tasks')
@@ -495,8 +497,8 @@ class DAQmxChannel(Channel):
 
     # Based on testing of the PGA2310/OPA234/BUF634 circuit with volume control
     # set to 0 dB, this is the maximum allowable voltage without clipping.
-    voltage_min = -1.1*np.sqrt(2)
-    voltage_max = 1.1*np.sqrt(2)
+    voltage_min = -DAQmxDefaults.SPEAKER_RANGE
+    voltage_max = DAQmxDefaults.SPEAKER_RANGE
 
     attenuator = ScalarInput(default=None, unit=None)
     attenuator_channel = ScalarInput(default=0, unit=None)
@@ -1057,7 +1059,6 @@ def acquire(*args, **kwargs):
     daq.start()
     daq.join()
     return daq.get_waveforms()
-
 
 
 class DAQmxAcquireWaveform(BaseDAQmxAcquire):

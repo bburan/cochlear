@@ -35,6 +35,7 @@ def configure_logging(filename=None):
             'cochlear.calibration': {'level': 'ERROR'},
             'experiment': {'level': 'ERROR'},
             'cochlear': {'level': 'DEBUG'},
+            'cochlear.dpoae_experiment': {'level': 'DEBUG'},
             'cochlear.nidaqmx': {'level': 'DEBUG'},
             },
         'root': {
