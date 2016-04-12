@@ -440,12 +440,14 @@ def chirp_power(waveform_averages=4, fft_window='boxcar', **kwargs):
 
 class GolayCalibration(object):
 
-    def __init__(self, n=16, vrms=1, gain=0, repetitions=1, iti=0.01,
-                 ab_delay=2,  fs=200e3,
+    def __init__(self, n=16, vpp=1, gain=0, repetitions=1, iti=0.01,
+                 ab_delay=2,  fs=200e3, input_range=10,
                  output_line=ni.DAQmxDefaults.PRIMARY_SPEAKER_OUTPUT,
                  input_line=ni.DAQmxDefaults.MIC_INPUT, callback=None):
 
         self.a, self.b = golay_pair(n)
+        self.a *= vpp
+        self.b *= vpp
         self.daq_kw = {
             'repetitions': repetitions,
             'output_line': output_line,
@@ -455,11 +457,14 @@ class GolayCalibration(object):
             'dac_fs': fs,
             'iti': iti,
             'callback': self.poll,
+            'input_range': input_range,
+            'output_range': vpp,
         }
         self.running = None
         self.callback = callback
         self.ab_delay = ab_delay
         self.fs = fs
+        self.vpp = vpp
 
     def poll(self, epochs_acquired, complete):
         if complete and self.running == 'a':
