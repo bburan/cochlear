@@ -757,7 +757,7 @@ if __name__ == '__main__':
 
     pyni.DAQmxResetDevice('PXI4461')
     mic_file = os.path.join('c:/data/cochlear/calibration',
-                            '150807 - Golay calibration with 377C10.mic')
+                            '160406 - Golay calibration with 377C10.mic')
     c = InterpCalibration.from_mic_file(mic_file)
     mic_input = ni.DAQmxDefaults.MIC_INPUT
 
