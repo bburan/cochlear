@@ -32,6 +32,7 @@ class BaseGolaySettings(BaseSignalSettings):
     iti = 1e-5
     ab_delay = Float(2, label='Delay between code A and B (sec)', **kw)
     smoothing_window = Int(25, label='Frequency smoothing window size', **kw)
+    output_gain = 0
 
     stimulus_settings = VGroup(
         'n',
@@ -60,7 +61,7 @@ class BaseGolayController(BaseSignalController):
         self.iface = GolayCalibration(
             ab_delay=self.get_current_value('ab_delay'),
             n=self.get_current_value('n'),
-            vrms=self.get_current_value('amplitude'),
+            vpp=self.get_current_value('amplitude'),
             gain=self.get_current_value('output_gain'),
             repetitions=self.get_current_value('averages'),
             iti=self.get_current_value('iti'),
@@ -68,6 +69,7 @@ class BaseGolayController(BaseSignalController):
             output_line=analog_output,
             input_line=self.MIC_INPUT,
             callback=self.poll,
+            input_range=self.get_current_value('exp_range'),
         )
 
 
@@ -76,7 +78,6 @@ class BaseGolayController(BaseSignalController):
 ################################################################################
 class ReferenceCalibrationSettings(ReferenceSettingsMixin, BaseGolaySettings):
 
-    output_gain = 6
     discard = 2
     n = 13
 
@@ -142,7 +143,6 @@ class HRTFSettings(HRTFSettingsMixin, BaseGolaySettings):
     discard = 1
     ab_delay = 0.1
     exp_mic_gain = 40
-    output_gain = -20
     fft_averages = 2
 
 
