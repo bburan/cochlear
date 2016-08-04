@@ -49,7 +49,7 @@ class ABRParadigm(AbstractParadigm):
     kw = dict(context=True, log=True)
 
     # Signal acquisition settings
-    averages = Expression(512, dtype=np.int, **kw)
+    averages = Expression(32, dtype=np.int, **kw)
     window = Expression(8.5e-3, dtype=np.float, **kw)
     reject_threshold = Expression(0.2, dtype=np.float, **kw)
     exp_mic_gain = Expression(40, dtype=np.float, **kw)
@@ -155,9 +155,6 @@ class ABRController(AbstractController):
     def stop_experiment(self, info=None):
         self.model.data.save()
 
-    def update_repetitions(self, value):
-        self.current_repetitions = value
-
     def next_trial(self):
         try:
             self.refresh_context(evaluate=True)
@@ -192,6 +189,7 @@ class ABRController(AbstractController):
             done_callback=self.acquisition_complete,
         )
 
+        self.current_repetitions = 0
         self.current_valid_repetitions = 0
         self.current_rejects = 0
         self.start_time = time.time()
@@ -199,9 +197,11 @@ class ABRController(AbstractController):
 
     def valid_epoch(self, frequency, level, polarity, presentation, epoch):
         self.current_valid_repetitions += 1
+        self.current_repetitions += 1
 
     def invalid_epoch(self, level, frequency, polarity, epoch):
         self.current_rejects += 1
+        self.current_repetitions += 1
 
     def samples_acquired(self, samples):
         self.model.data.raw_channel.send(samples.ravel())
