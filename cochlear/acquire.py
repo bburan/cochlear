@@ -1,3 +1,6 @@
+from guppy import hpy
+hp = hpy()
+
 import logging
 log = logging.getLogger(__name__)
 
@@ -97,11 +100,12 @@ class ABRAcquisition(Thread):
             fs=adc_fs,
             input_line=ni.DAQmxDefaults.ERP_INPUT,
             pipeline=pipeline,
-            expected_range=1,
+            expected_range=10,
             start_trigger='ao/StartTrigger',
             record_mode=ni.DAQmxInput.DIFF,
             callback_samples=input_samples,
             done_callback=self.stop,
+            coupling=ni.DAQmxInput.COUPLING_AC,
         )
 
         iface_dac = ni.QueuedDAQmxPlayer(
