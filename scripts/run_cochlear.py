@@ -1,4 +1,6 @@
 import os.path
+os.environ['ETS_TOOLKIT'] = 'qt4'
+
 import datetime as dt
 import re
 
