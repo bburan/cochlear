@@ -336,7 +336,7 @@ def get_chirp_transform(vrms, start_atten=6, end_atten=-6, start_frequency=0,
                         end_frequency=100e3):
     frequencies = [start_frequency, end_frequency]
     magnitude = [start_atten, end_atten]
-    return InterpCalibration.from_single_vrms(frequencies, magnitude, vrms)
+    return InterpCalibration.from_spl(frequencies, magnitude, vrms)
 
 
 class CalibrationResult(object):
