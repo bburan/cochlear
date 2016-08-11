@@ -1,6 +1,3 @@
-from guppy import hpy
-hp = hpy()
-
 import logging
 log = logging.getLogger(__name__)
 
@@ -234,6 +231,8 @@ def test_acquisition():
     # Connect ao0 to ai0 and ai1. The resulting plot should show noise, no tone
     # pips.
     import os.path
+    import pylab as pl
+    import matplotlib as mp
     from neurogen.calibration import InterpCalibration
 
     # Override standard ABR reject with specialized fucntion
@@ -248,10 +247,7 @@ def test_acquisition():
                 target_fail.send(data)
     globals()['abr_reject'] = abr_reject
 
-    mic_file = os.path.join('c:/data/cochlear/calibration',
-                            '150807 - Golay calibration with 377C10.mic')
-    input_calibration = InterpCalibration.from_mic_file(mic_file)
-    input_calibration.set_fixed_gain(-40)
+    input_calibration = InterpCalibration.from_spl([0, 100e3], [60, 60], vrms=1)
     frequencies = [2e3, 8e3]
     levels = [60, 40]
 
@@ -264,6 +260,20 @@ def test_acquisition():
     output_calibration = calibration.multitone_calibration(
         frequencies, input_calibration, gain=-40)
 
+    def monkeypatch(instancemethod):
+        '''
+        Wrapper to monkey-patch the ABRAcquisition.get_waveforms so that the
+        inverted polarity waveforms are flipped, allowing us to test whether
+        the waveforms are being generated properly.
+        '''
+        def wrapper(self, frequency, level):
+            result = instancemethod(self, frequency, level)
+            n = int(len(result)/2)
+            result[-n:] = -result[-n:]
+            return result
+        return wrapper
+
+    ABRAcquisition.get_waveforms = monkeypatch(ABRAcquisition.get_waveforms)
     acq = ABRAcquisition(frequencies, levels, output_calibration,
                          pip_averages=2,
                          samples_acquired_callback=samples_acquired_cb,
@@ -271,13 +281,24 @@ def test_acquisition():
     acq.start()
     acq.join()
 
-    import pylab as pl
+    pl.figure()
     for frequency in frequencies:
         for level in levels:
             w = acq.get_waveforms(frequency, level).mean(axis=0)[0]
             pl.plot(w, label='{} {}'.format(frequency, level))
-
     pl.legend()
+
+    pl.figure()
+    grid = mp.gridspec.GridSpec(len(frequencies), len(levels))
+    for i, frequency in enumerate(frequencies):
+        for j, level in enumerate(levels):
+            ax = pl.subplot(grid[i, j])
+            ax.set_title('{} Hz, {} dB SPL'.format(frequency, level))
+            waveforms = acq.get_waveforms(frequency, level)[:, 0]
+            mean_waveform = waveforms.mean(axis=0)
+            ax.plot(mean_waveform, lw=2)
+            ax.plot(waveforms[-1], lw=1)
+
     pl.show()
 
 
